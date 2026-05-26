@@ -8,10 +8,21 @@ from functools import reduce
 # 設定頁面與版面
 st.set_page_config(page_title="Active ETF 監控系統", layout="wide")
 
+# --- 環境路徑初始化 ---
+# 強制將工作目錄設為程式所在路徑，防止雲端部署路徑錯誤
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 data_dir = 'data'
-if not os.path.exists(data_dir): os.makedirs(data_dir)
 
+if not os.path.exists(data_dir):
+    st.error(f"錯誤：找不到 '{data_dir}' 資料夾，請確認 GitHub 倉庫內包含此資料夾。")
+    st.stop()
+
+# 獲取並檢查檔案
 files = sorted([f for f in os.listdir(data_dir) if f.endswith('.csv') and '_' in f], reverse=True)
+if not files:
+    st.warning("data 資料夾為空或無符合格式檔案，請確認 GitHub Actions 是否已成功推送資料。")
+    st.stop()
+
 etf_list = sorted(list(set([f.split('_')[0] for f in files])))
 
 # 定義 ETF 中文對應表
@@ -28,7 +39,6 @@ mode = st.sidebar.radio("分析模式", ["單檔 ETF 分析", "多檔市場分�
 
 # --- 單檔 ETF 分析 ---
 if mode == "單檔 ETF 分析":
-    # 顯示中文選單
     display_list = [etf_names.get(e, e) for e in etf_list]
     selected_display = st.sidebar.selectbox("選擇主動式 ETF", display_list)
     selected_etf = [k for k, v in etf_names.items() if v == selected_display][0]
@@ -37,8 +47,6 @@ if mode == "單檔 ETF 分析":
     
     if etf_files:
         df_now = pd.read_csv(os.path.join(data_dir, etf_files[0]), encoding='utf-8-sig')
-        
-        # 取得資料來源時間
         file_path = os.path.join(data_dir, etf_files[0])
         m_time = pd.Timestamp(os.path.getmtime(file_path), unit='s').strftime('%Y-%m-%d')
         
@@ -89,7 +97,6 @@ if mode == "單檔 ETF 分析":
                     "減碼": (m['持有股數_pre'] > 0) & (m['股數變動'] < 0) & (m['持有股數_now'] > 0),
                     "出清": (m['持有股數_pre'] > 0) & (m['持有股數_now'] == 0)
                 }
-                
                 for i, (status, mask) in enumerate(status_map.items()):
                     cols[i].subheader(status)
                     sub_df = m[mask][['個股名稱', '股數變動']].sort_values('股數變動', ascending=(status == '減碼'))
@@ -100,9 +107,7 @@ if mode == "單檔 ETF 分析":
 else:
     st.title("🌐 多檔市場綜合分析")
     sub1, sub2, sub3 = st.tabs(["📈 績效分析", "🔄 共同調倉", "🤝 共同持股"])
-    
     with sub1:
-        st.subheader("各檔 ETF 多週期報酬率 (%)")
         perf_data = []
         for etf in etf_list:
             hist = yf.Ticker(f"{etf}.TW").history(period="6mo")
@@ -114,9 +119,7 @@ else:
                 else: row[label] = "N/A"
             perf_data.append(row)
         st.table(pd.DataFrame(perf_data).set_index('ETF'))
-
     with sub2:
-        st.subheader("共同調倉標的 (兩檔以上同步操作)")
         all_changes = []
         for etf in etf_list:
             f_list = sorted([f for f in files if f.startswith(etf)], reverse=True)
@@ -126,13 +129,11 @@ else:
                 m['變動'] = (m['持有股數_n'] - m['持有股數_p']) / 1000
                 m['ETF'] = etf
                 all_changes.append(m[['個股名稱', '變動', 'ETF']])
-        
         if all_changes:
             df_all = pd.concat(all_changes)
             c1, c2 = st.columns(2)
             c1.write("📈 同步買進"); c1.dataframe(df_all[df_all['變動'] > 0].groupby('個股名稱').filter(lambda x: len(x) >= 2))
             c2.write("📉 同步賣出"); c2.dataframe(df_all[df_all['變動'] < 0].groupby('個股名稱').filter(lambda x: len(x) >= 2))
-    
     with sub3:
         dfs = []
         for etf in etf_list:
@@ -143,15 +144,11 @@ else:
             df = df[['個股名稱', '投資比例(%)']]
             df.columns = ['個股名稱', etf]
             dfs.append(df)
-        
         if dfs:
             df_all = reduce(lambda left, right: pd.merge(left, right, on='個股名稱', how='outer'), dfs).fillna(0)
             etf_cols = [c for c in df_all.columns if c != '個股名稱']
             count = (df_all[etf_cols] > 0).sum(axis=1)
-
-            # 在表格上方增加說明
             st.info("💡 **標記說明：** 表格最左側標記「★」者，代表該標的在涉及的所有 ETF 中，持股比例皆大於 1.00% (核心強勢股)。")
-            
             def display_table(df_subset, title):
                 st.subheader(title)
                 if df_subset.empty: return
@@ -159,6 +156,5 @@ else:
                 df_disp['標記'] = df_subset.apply(lambda row: "★" if all(row[col] > 1.0 for col in etf_cols) else "", axis=1)
                 for col in etf_cols: df_disp[col] = df_subset[col].apply(lambda x: f"{x:.2f}")
                 st.dataframe(df_disp[['標記', '個股名稱'] + etf_cols], use_container_width=True)
-
             display_table(df_all[count == 5], "五家 ETF 共同持有之個股權重")
             display_table(df_all[count == 4], "四家 ETF 共同持有之個股權重")
