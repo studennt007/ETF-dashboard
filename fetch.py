@@ -2,8 +2,8 @@ import pandas as pd
 import requests
 import os
 import yfinance as yf
-import twstock
 import time
+import glob
 from datetime import datetime
 from io import StringIO
 import re
@@ -20,64 +20,63 @@ etf_data = {
 headers = {'User-Agent': 'Mozilla/5.0'}
 if not os.path.exists('data'): os.makedirs('data')
 
-def get_stock_metrics(ticker):
-    """
-    計算漲跌幅與漲跌價
-    邏輯：(最新價格 - 昨日收盤價) / 昨日收盤價
-    """
-    code = str(ticker).split('.')[0]
-    
-    # 1. 嘗試 yfinance
+def get_latest_market_data(ticker):
+    """取得最新市場資訊：最後交易日期、漲跌幅、漲跌價、成交量"""
     try:
         yf_ticker = yf.Ticker(ticker)
         hist = yf_ticker.history(period="5d")
-        if len(hist) >= 2:
-            # 取得最後兩筆交易日數據
-            prev_close = hist['Close'].iloc[-2]
-            curr_price = hist['Close'].iloc[-1]
-            change = curr_price - prev_close
-            pct = (change / prev_close) * 100
-            return round(float(pct), 2), round(float(change), 2)
+        if len(hist) < 2: return None
+        
+        last_date = hist.index[-1].strftime('%Y%m%d')
+        prev_close = hist['Close'].iloc[-2]
+        curr_price = hist['Close'].iloc[-1]
+        volume = int(hist['Volume'].iloc[-1])
+        
+        change = curr_price - prev_close
+        pct = (change / prev_close) * 100
+        return last_date, round(float(pct), 2), round(float(change), 2), volume
     except:
-        pass
-
-    # 2. 若 yfinance 失敗，嘗試 twstock (針對台股專用)
-    try:
-        stock = twstock.Stock(code)
-        data = stock.fetch_31() # 取得近期資料
-        if len(data) >= 2:
-            prev_close = data[-2].close
-            curr_price = data[-1].close
-            change = curr_price - prev_close
-            pct = (change / prev_close) * 100
-            return round(float(pct), 2), round(float(change), 2)
-    except:
-        pass
-    
-    return 0.0, 0.0 # 若兩者皆查不到，回傳 0
+        return None
 
 # 主程式執行區
+print(f"--- 啟動更新程式: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
+
 for code, url in etf_data.items():
-    print(f"--- 正在處理 {code} ---")
     try:
         response = requests.get(url, headers=headers)
         response.encoding = 'utf-8'
         df = pd.read_html(StringIO(response.text))[1]
-        
-        # 提取括號內代號
         df['ticker'] = df['個股名稱'].apply(lambda x: re.search(r'\((.*)\)', x).group(1) if re.search(r'\((.*)\)', x) else None)
         
-        print("正在獲取最新股價與漲跌資訊...")
-        # 批次運算漲跌幅與漲跌價
-        results = df['ticker'].apply(get_stock_metrics)
-        df['今日漲跌幅%'], df['今日漲跌價'] = zip(*results)
+        first_ticker = f"{df['ticker'].dropna().iloc[0]}.TW"
+        latest_info = get_latest_market_data(first_ticker)
         
-        # 存檔
-        output_path = f"data/{code}_{datetime.now().strftime('%Y%m%d')}.csv"
+        if not latest_info:
+            print(f"[{code}] 無法取得市場數據，跳過。")
+            continue
+            
+        last_date, pct, change, volume = latest_info
+        
+        # 檢查機制：若已有今日檔案或成交量沒變，則跳過
+        files = sorted(glob.glob(f"data/{code}_*.csv"))
+        if files:
+            last_file = files[-1]
+            if last_date in last_file:
+                print(f"[{code}] 資料已是最新的 (日期: {last_date})，跳過。")
+                continue
+        
+        print(f"[{code}] 資料更新中...")
+        # 批次運算
+        results = df['ticker'].apply(lambda t: get_latest_market_data(f"{t}.TW")[1:4] if get_latest_market_data(f"{t}.TW") else (0.0, 0.0, 0))
+        df['今日漲跌幅%'], df['今日漲跌價'], df['Volume'] = zip(*results)
+        
+        output_path = f"data/{code}_{last_date}.csv"
         df.to_csv(output_path, index=False, encoding='utf-8-sig')
-        print(f"成功更新 {code}，檔案已存至: {output_path}")
+        print(f"[{code}] 更新成功，存檔至: {output_path}")
         
-        time.sleep(1.5) # 避免頻繁訪問被鎖 IP
+        time.sleep(1.5)
         
     except Exception as e:
         print(f"處理 {code} 時發生錯誤: {e}")
+
+print("--- 所有任務檢查完畢，目前資料皆為最新 ---")
