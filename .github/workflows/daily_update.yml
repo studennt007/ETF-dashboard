@@ -1,0 +1,33 @@
+name: Daily Data Update
+on:
+  schedule:
+    # 台灣時間 21:00 = UTC 13:00
+    - cron: '0 13 * * *'
+  workflow_dispatch: 
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install pandas yfinance
+      
+      - name: Run fetch script
+        run: python fetch.py
+
+      - name: Commit and push changes
+        run: |
+          git config --global user.name 'GitHub Action'
+          git config --global user.email 'action@github.com'
+          git add data/
+          git commit -m "Auto-update ETF data" || exit 0
+          git push
