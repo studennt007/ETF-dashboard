@@ -23,11 +23,6 @@ if not files:
     st.warning("data 資料夾為空或無符合格式檔案，請確認 GitHub Actions 是否已成功推送資料。")
     st.stop()
 
-# 獲取最近一次的檔案時間 (用於多檔分析統一基準)
-latest_file_path = os.path.join(data_dir, files[0])
-m_time = pd.Timestamp(os.path.getmtime(latest_file_path), unit='s').strftime('%Y-%m-%d')
-today_str = datetime.date.today().strftime('%Y-%m-%d')
-
 etf_list = sorted(list(set([f.split('_')[0] for f in files])))
 
 # 定義 ETF 中文對應表
@@ -50,13 +45,19 @@ if mode == "單檔 ETF 分析":
     etf_files = sorted([f for f in files if f.startswith(selected_etf)], reverse=True)
     
     if etf_files:
-        df_now = pd.read_csv(os.path.join(data_dir, etf_files[0]), encoding='utf-8-sig')
+        file_path = os.path.join(data_dir, etf_files[0])
+        # CSV 資料更新時間
+        m_time = pd.Timestamp(os.path.getmtime(file_path), unit='s').strftime('%Y-%m-%d')
+        # 行情即時日期
+        today_str = datetime.date.today().strftime('%Y-%m-%d')
+        
+        df_now = pd.read_csv(file_path, encoding='utf-8-sig')
         
         st.title(f"📊 {selected_display} 分析儀表板")
         tab1, tab2, tab3 = st.tabs(["📈 ETF 行情分析", "📋 成分股分析", "🔄 持股增減分析"])
         
         with tab1:
-            st.caption(f"🕒 資料更新時間: {today_str}")
+            st.caption(f"🕒 行情日期: {today_str} (即時)")
             period_map = {"1個月": "1mo", "3個月": "3mo", "6個月": "6mo", "1年": "1y"}
             selected_period = st.radio("選擇觀察區間", list(period_map.keys()), horizontal=True)
             hist = yf.Ticker(f"{selected_etf}.TW").history(period=period_map[selected_period])
@@ -99,10 +100,12 @@ if mode == "單檔 ETF 分析":
 
 # --- 多檔市場分析 ---
 else:
+    # 統一基準時間
+    m_time_all = pd.Timestamp(os.path.getmtime(os.path.join(data_dir, files[0])), unit='s').strftime('%Y-%m-%d')
     st.title("🌐 多檔市場綜合分析")
     sub1, sub2, sub3 = st.tabs(["📈 績效分析", "🔄 共同調倉", "🤝 共同持股"])
     with sub1:
-        st.caption(f"🕒 資料更新時間: {m_time}")
+        st.caption(f"🕒 資料更新時間: {m_time_all}")
         perf_data = []
         for etf in etf_list:
             hist = yf.Ticker(f"{etf}.TW").history(period="6mo")
@@ -115,7 +118,7 @@ else:
             perf_data.append(row)
         st.table(pd.DataFrame(perf_data).set_index('ETF'))
     with sub2:
-        st.caption(f"🕒 資料更新時間: {m_time}")
+        st.caption(f"🕒 資料更新時間: {m_time_all}")
         all_changes = []
         for etf in etf_list:
             f_list = sorted([f for f in files if f.startswith(etf)], reverse=True)
@@ -131,7 +134,7 @@ else:
             c1.write("📈 同步買進"); c1.dataframe(df_all[df_all['變動'] > 0].groupby('個股名稱').filter(lambda x: len(x) >= 2))
             c2.write("📉 同步賣出"); c2.dataframe(df_all[df_all['變動'] < 0].groupby('個股名稱').filter(lambda x: len(x) >= 2))
     with sub3:
-        st.caption(f"🕒 資料更新時間: {m_time}")
+        st.caption(f"🕒 資料更新時間: {m_time_all}")
         dfs = []
         for etf in etf_list:
             f_latest = [f for f in files if f.startswith(etf)][0]
