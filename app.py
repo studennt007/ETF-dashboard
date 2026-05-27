@@ -34,6 +34,14 @@ etf_names = {
     "00992A": "00992A 主動群益科技創新"
 }
 
+# 輔助函式：從檔名提取日期 (假設格式為 代號_YYYYMMDD.csv)
+def get_date_from_filename(filename):
+    try:
+        date_part = filename.split('_')[1].replace('.csv', '')
+        return f"{date_part[:4]}-{date_part[4:6]}-{date_part[6:8]}"
+    except:
+        return "未知日期"
+
 st.sidebar.title("ETF 監控中心")
 mode = st.sidebar.radio("分析模式", ["單檔 ETF 分析", "多檔市場分析"])
 
@@ -45,13 +53,11 @@ if mode == "單檔 ETF 分析":
     etf_files = sorted([f for f in files if f.startswith(selected_etf)], reverse=True)
     
     if etf_files:
-        file_path = os.path.join(data_dir, etf_files[0])
-        # CSV 資料更新時間
-        m_time = pd.Timestamp(os.path.getmtime(file_path), unit='s').strftime('%Y-%m-%d')
-        # 行情即時日期
+        # 從檔名解析日期
+        m_time = get_date_from_filename(etf_files[0])
         today_str = datetime.date.today().strftime('%Y-%m-%d')
         
-        df_now = pd.read_csv(file_path, encoding='utf-8-sig')
+        df_now = pd.read_csv(os.path.join(data_dir, etf_files[0]), encoding='utf-8-sig')
         
         st.title(f"📊 {selected_display} 分析儀表板")
         tab1, tab2, tab3 = st.tabs(["📈 ETF 行情分析", "📋 成分股分析", "🔄 持股增減分析"])
@@ -100,8 +106,8 @@ if mode == "單檔 ETF 分析":
 
 # --- 多檔市場分析 ---
 else:
-    # 統一基準時間
-    m_time_all = pd.Timestamp(os.path.getmtime(os.path.join(data_dir, files[0])), unit='s').strftime('%Y-%m-%d')
+    # 統一取最新檔案的日期
+    m_time_all = get_date_from_filename(files[0])
     st.title("🌐 多檔市場綜合分析")
     sub1, sub2, sub3 = st.tabs(["📈 績效分析", "🔄 共同調倉", "🤝 共同持股"])
     with sub1:
