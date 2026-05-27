@@ -4,12 +4,12 @@ import os
 import plotly.express as px
 import yfinance as yf
 from functools import reduce
+import datetime
 
 # 設定頁面與版面
 st.set_page_config(page_title="Active ETF 監控系統", layout="wide")
 
 # --- 環境路徑初始化 ---
-# 強制將工作目錄設為程式所在路徑，防止雲端部署路徑錯誤
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 data_dir = 'data'
 
@@ -22,6 +22,11 @@ files = sorted([f for f in os.listdir(data_dir) if f.endswith('.csv') and '_' in
 if not files:
     st.warning("data 資料夾為空或無符合格式檔案，請確認 GitHub Actions 是否已成功推送資料。")
     st.stop()
+
+# 獲取最近一次的檔案時間 (用於多檔分析統一基準)
+latest_file_path = os.path.join(data_dir, files[0])
+m_time = pd.Timestamp(os.path.getmtime(latest_file_path), unit='s').strftime('%Y-%m-%d')
+today_str = datetime.date.today().strftime('%Y-%m-%d')
 
 etf_list = sorted(list(set([f.split('_')[0] for f in files])))
 
@@ -42,20 +47,16 @@ if mode == "單檔 ETF 分析":
     display_list = [etf_names.get(e, e) for e in etf_list]
     selected_display = st.sidebar.selectbox("選擇主動式 ETF", display_list)
     selected_etf = [k for k, v in etf_names.items() if v == selected_display][0]
-    
     etf_files = sorted([f for f in files if f.startswith(selected_etf)], reverse=True)
     
     if etf_files:
         df_now = pd.read_csv(os.path.join(data_dir, etf_files[0]), encoding='utf-8-sig')
-        file_path = os.path.join(data_dir, etf_files[0])
-        m_time = pd.Timestamp(os.path.getmtime(file_path), unit='s').strftime('%Y-%m-%d')
         
         st.title(f"📊 {selected_display} 分析儀表板")
-        st.caption(f"🕒 資料來源時間: {m_time}")
-        
         tab1, tab2, tab3 = st.tabs(["📈 ETF 行情分析", "📋 成分股分析", "🔄 持股增減分析"])
         
         with tab1:
+            st.caption(f"🕒 資料更新時間: {today_str}")
             period_map = {"1個月": "1mo", "3個月": "3mo", "6個月": "6mo", "1年": "1y"}
             selected_period = st.radio("選擇觀察區間", list(period_map.keys()), horizontal=True)
             hist = yf.Ticker(f"{selected_etf}.TW").history(period=period_map[selected_period])
@@ -71,32 +72,25 @@ if mode == "單檔 ETF 分析":
                 st.plotly_chart(px.line(hist, y='Close', title=f'近 {selected_period} 走勢'), use_container_width=True)
             
         with tab2:
+            st.caption(f"🕒 資料更新時間: {m_time}")
             top_holdings = df_now.nlargest(20, '投資比例(%)')
-            fig = px.bar(top_holdings, x='投資比例(%)', y='個股名稱', orientation='h', 
-                         title="成分股權重前 20 大分佈", color='投資比例(%)', color_continuous_scale='Blues')
+            fig = px.bar(top_holdings, x='投資比例(%)', y='個股名稱', orientation='h', title="成分股權重前 20 大分佈", color='投資比例(%)', color_continuous_scale='Blues')
             fig.update_layout(yaxis={'categoryorder': 'total ascending'})
             st.plotly_chart(fig, use_container_width=True)
-            
             df_display = df_now.drop(columns=['ticker'], errors='ignore')
-            if '今日漲跌價' in df_display.columns:
-                df_display['今日漲跌價'] = df_display['今日漲跌價'].apply(lambda x: f"{x:.2f}")
+            if '今日漲跌價' in df_display.columns: df_display['今日漲跌價'] = df_display['今日漲跌價'].apply(lambda x: f"{x:.2f}")
             st.dataframe(df_display, use_container_width=True)
             
         with tab3:
+            st.caption(f"🕒 資料更新時間: {m_time}")
             if len(etf_files) >= 2:
                 df_pre = pd.read_csv(os.path.join(data_dir, etf_files[1]), encoding='utf-8-sig')
                 df_now['個股名稱'] = df_now['個股名稱'].astype(str).str.strip()
                 df_pre['個股名稱'] = df_pre['個股名稱'].astype(str).str.strip()
                 m = pd.merge(df_now, df_pre, on='個股名稱', how='outer', suffixes=('_now', '_pre')).fillna(0)
                 m['股數變動'] = (m['持有股數_now'] - m['持有股數_pre']) / 1000
-                
                 cols = st.columns(4)
-                status_map = {
-                    "新增": (m['持有股數_pre'] == 0) & (m['持有股數_now'] > 0),
-                    "加碼": (m['持有股數_pre'] > 0) & (m['股數變動'] > 0),
-                    "減碼": (m['持有股數_pre'] > 0) & (m['股數變動'] < 0) & (m['持有股數_now'] > 0),
-                    "出清": (m['持有股數_pre'] > 0) & (m['持有股數_now'] == 0)
-                }
+                status_map = {"新增": (m['持有股數_pre'] == 0) & (m['持有股數_now'] > 0), "加碼": (m['持有股數_pre'] > 0) & (m['股數變動'] > 0), "減碼": (m['持有股數_pre'] > 0) & (m['股數變動'] < 0) & (m['持有股數_now'] > 0), "出清": (m['持有股數_pre'] > 0) & (m['持有股數_now'] == 0)}
                 for i, (status, mask) in enumerate(status_map.items()):
                     cols[i].subheader(status)
                     sub_df = m[mask][['個股名稱', '股數變動']].sort_values('股數變動', ascending=(status == '減碼'))
@@ -108,6 +102,7 @@ else:
     st.title("🌐 多檔市場綜合分析")
     sub1, sub2, sub3 = st.tabs(["📈 績效分析", "🔄 共同調倉", "🤝 共同持股"])
     with sub1:
+        st.caption(f"🕒 資料更新時間: {m_time}")
         perf_data = []
         for etf in etf_list:
             hist = yf.Ticker(f"{etf}.TW").history(period="6mo")
@@ -120,6 +115,7 @@ else:
             perf_data.append(row)
         st.table(pd.DataFrame(perf_data).set_index('ETF'))
     with sub2:
+        st.caption(f"🕒 資料更新時間: {m_time}")
         all_changes = []
         for etf in etf_list:
             f_list = sorted([f for f in files if f.startswith(etf)], reverse=True)
@@ -135,6 +131,7 @@ else:
             c1.write("📈 同步買進"); c1.dataframe(df_all[df_all['變動'] > 0].groupby('個股名稱').filter(lambda x: len(x) >= 2))
             c2.write("📉 同步賣出"); c2.dataframe(df_all[df_all['變動'] < 0].groupby('個股名稱').filter(lambda x: len(x) >= 2))
     with sub3:
+        st.caption(f"🕒 資料更新時間: {m_time}")
         dfs = []
         for etf in etf_list:
             f_latest = [f for f in files if f.startswith(etf)][0]
