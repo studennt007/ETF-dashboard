@@ -1,8 +1,9 @@
 name: Daily Data Update
+
 on:
+  # 每天 UTC 13:00 (台灣時間 21:00) 自動執行
   schedule:
-    # 測試設定：UTC 13:49 = 台灣時間 21:49
-    - cron: '42 13 * * *'
+    - cron: '0 13 * * *'
   workflow_dispatch:
 
 permissions:
