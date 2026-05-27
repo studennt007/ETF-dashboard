@@ -34,7 +34,7 @@ etf_names = {
     "00992A": "00992A 主動群益科技創新"
 }
 
-# 輔助函式：從檔名提取日期 (假設格式為 代號_YYYYMMDD.csv)
+# 輔助函式：從檔名提取日期
 def get_date_from_filename(filename):
     try:
         date_part = filename.split('_')[1].replace('.csv', '')
@@ -53,10 +53,8 @@ if mode == "單檔 ETF 分析":
     etf_files = sorted([f for f in files if f.startswith(selected_etf)], reverse=True)
     
     if etf_files:
-        # 從檔名解析日期
         m_time = get_date_from_filename(etf_files[0])
         today_str = datetime.date.today().strftime('%Y-%m-%d')
-        
         df_now = pd.read_csv(os.path.join(data_dir, etf_files[0]), encoding='utf-8-sig')
         
         st.title(f"📊 {selected_display} 分析儀表板")
@@ -106,7 +104,6 @@ if mode == "單檔 ETF 分析":
 
 # --- 多檔市場分析 ---
 else:
-    # 統一取最新檔案的日期
     m_time_all = get_date_from_filename(files[0])
     st.title("🌐 多檔市場綜合分析")
     sub1, sub2, sub3 = st.tabs(["📈 績效分析", "🔄 共同調倉", "🤝 共同持股"])
@@ -123,6 +120,7 @@ else:
                 else: row[label] = "N/A"
             perf_data.append(row)
         st.table(pd.DataFrame(perf_data).set_index('ETF'))
+    
     with sub2:
         st.caption(f"🕒 資料更新時間: {m_time_all}")
         all_changes = []
@@ -137,8 +135,13 @@ else:
         if all_changes:
             df_all = pd.concat(all_changes)
             c1, c2 = st.columns(2)
-            c1.write("📈 同步買進"); c1.dataframe(df_all[df_all['變動'] > 0].groupby('個股名稱').filter(lambda x: len(x) >= 2))
-            c2.write("📉 同步賣出"); c2.dataframe(df_all[df_all['變動'] < 0].groupby('個股名稱').filter(lambda x: len(x) >= 2))
+            # 篩選並進行排序
+            buy_df = df_all[df_all['變動'] > 0].groupby('個股名稱').filter(lambda x: len(x) >= 2)
+            sell_df = df_all[df_all['變動'] < 0].groupby('個股名稱').filter(lambda x: len(x) >= 2)
+            
+            c1.write("📈 同步買進"); c1.dataframe(buy_df.sort_values('個股名稱'), use_container_width=True)
+            c2.write("📉 同步賣出"); c2.dataframe(sell_df.sort_values('個股名稱'), use_container_width=True)
+
     with sub3:
         st.caption(f"🕒 資料更新時間: {m_time_all}")
         dfs = []
