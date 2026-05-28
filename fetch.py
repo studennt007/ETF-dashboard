@@ -1,9 +1,7 @@
 import pandas as pd
 import requests
 import os
-import yfinance as yf
 import time
-import glob
 from datetime import datetime
 from io import StringIO
 import re
@@ -22,27 +20,6 @@ etf_data = {
 
 headers = {'User-Agent': 'Mozilla/5.0'}
 
-def get_latest_market_data(ticker):
-    """取得最新市場資訊：最後交易日期、漲跌幅、漲跌價、成交量"""
-    try:
-        yf_ticker = yf.Ticker(ticker)
-        # 增加緩衝時間，避免請求過快被鎖
-        hist = yf_ticker.history(period="5d")
-        if len(hist) < 2: return None
-        
-        last_date = hist.index[-1].strftime('%Y%m%d')
-        prev_close = hist['Close'].iloc[-2]
-        curr_price = hist['Close'].iloc[-1]
-        volume = int(hist['Volume'].iloc[-1])
-        
-        change = curr_price - prev_close
-        pct = (change / prev_close) * 100
-        return last_date, round(float(pct), 2), round(float(change), 2), volume
-    except Exception as e:
-        print(f"yfinance 錯誤 ({ticker}): {e}")
-        return None
-
-# 主程式
 print(f"--- 啟動更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
 
 for code, url in etf_data.items():
@@ -50,35 +27,28 @@ for code, url in etf_data.items():
         print(f"[{code}] 正在抓取成分股列表...")
         response = requests.get(url, headers=headers)
         response.encoding = 'utf-8'
+        
+        # 讀取網頁表格
+        # MoneyDJ 的成分股列表通常在第 2 個表格 (index=1)
         df = pd.read_html(StringIO(response.text))[1]
         
-        # 提取代號
+        # 提取代號 (保留原本的邏輯)
         df['ticker'] = df['個股名稱'].apply(lambda x: re.search(r'\((.*)\)', x).group(1) if re.search(r'\((.*)\)', x) else None)
         
-        # 取得基準日期 (使用該 ETF 本身的最新交易日)
-        latest_info = get_latest_market_data(f"{code}.TW")
-        if not latest_info:
-            print(f"[{code}] 無法取得基準市場數據，跳過。")
-            continue
-        last_date = latest_info[0]
+        # 僅保留需要的欄位
+        output_df = df[['個股名稱', '持有股數', '投資比例(%)', 'ticker']]
         
-        # 批次處理每檔個股行情
-        print(f"[{code}] 正在計算成分股漲跌 (日期: {last_date})...")
-        processed_data = []
-        for t in df['ticker'].dropna():
-            info = get_latest_market_data(f"{t}.TW")
-            processed_data.append(info[1:4] if info else (0.0, 0.0, 0))
+        # 寫入檔案：改用固定檔名 {code}_latest.csv
+        # 這樣 Git 每次比對的都是同一個檔案，變更會更清楚，也不會產生一堆垃圾日期檔案
+        output_path = os.path.join('data', f"{code}_latest.csv")
+        output_df.to_csv(output_path, index=False, encoding='utf-8-sig')
         
-        df['今日漲跌幅%'], df['今日漲跌價'], df['Volume'] = zip(*processed_data)
-        
-        # 強制寫入路徑
-        output_path = os.path.join('data', f"{code}_{last_date}.csv")
-        df.to_csv(output_path, index=False, encoding='utf-8-sig')
         print(f"[{code}] 成功寫入檔案: {output_path}")
         
-        time.sleep(2) # 避免 API 頻率限制
+        # 稍作停頓保護請求頻率
+        time.sleep(2)
         
     except Exception as e:
-        print(f"處理 {code} 時發生錯誤: {e}")
+        print(f"[{code}] 處理時發生錯誤: {e}")
 
 print("--- 更新流程結束 ---")
