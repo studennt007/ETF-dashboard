@@ -1,10 +1,11 @@
 name: Daily Data Update
+
 on:
   push:
-    branches: [ main ]  # 只要你推送程式碼，就會自動跑
+    branches: [ main ]
   schedule:
-    - cron: '0 13 * * *' # 保留原有的排程 (UTC 13:00)
-  workflow_dispatch:     # 保留手動按鈕
+    - cron: '*/5 * * * *'  # 這裡必須是 */5 才能代表每五分鐘
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -12,6 +13,8 @@ permissions:
 jobs:
   update-data:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -22,9 +25,9 @@ jobs:
           python-version: '3.9'
 
       - name: Install dependencies
-        run: |
-          pip install pandas yfinance twstock
-      
+        # 移除了不需要的 yfinance 和 twstock 以節省時間
+        run: pip install pandas requests lxml
+
       - name: Run fetch script
         run: python fetch.py
 
