@@ -93,12 +93,21 @@ if mode == "單檔 ETF 分析":
                 df_now['個股名稱'] = df_now['個股名稱'].astype(str).str.strip()
                 df_pre['個股名稱'] = df_pre['個股名稱'].astype(str).str.strip()
                 m = pd.merge(df_now, df_pre, on='個股名稱', how='outer', suffixes=('_now', '_pre')).fillna(0)
-                m['股數變動'] = (m['持有股數_now'] - m['持有股數_pre']) / 1000
+                
+                # 計算張數變動 (1張=1000股)
+                m['張數變動'] = (m['持有股數_now'] - m['持有股數_pre']) / 1000
+                
                 cols = st.columns(4)
-                status_map = {"新增": (m['持有股數_pre'] == 0) & (m['持有股數_now'] > 0), "加碼": (m['持有股數_pre'] > 0) & (m['股數變動'] > 0), "減碼": (m['持有股數_pre'] > 0) & (m['股數變動'] < 0) & (m['持有股數_now'] > 0), "出清": (m['持有股數_pre'] > 0) & (m['持有股數_now'] == 0)}
+                status_map = {
+                    "新增": (m['持有股數_pre'] == 0) & (m['持有股數_now'] > 0), 
+                    "加碼": (m['持有股數_pre'] > 0) & (m['張數變動'] > 0), 
+                    "減碼": (m['持有股數_pre'] > 0) & (m['張數變動'] < 0) & (m['持有股數_now'] > 0), 
+                    "出清": (m['持有股數_pre'] > 0) & (m['持有股數_now'] == 0)
+                }
+                
                 for i, (status, mask) in enumerate(status_map.items()):
                     cols[i].subheader(status)
-                    sub_df = m[mask][['個股名稱', '股數變動']].sort_values('股數變動', ascending=(status == '減碼'))
+                    sub_df = m[mask][['個股名稱', '張數變動']].sort_values('張數變動', ascending=(status == '減碼'))
                     cols[i].dataframe(sub_df, use_container_width=True, hide_index=True)
             else: st.warning("需要至少兩份歷史資料。")
 
