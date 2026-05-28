@@ -78,13 +78,23 @@ if mode == "單檔 ETF 分析":
             
         with tab2:
             st.caption(f"🕒 資料更新時間: {m_time}")
+            
+            # 1. 繪製前 20 大權重長條圖
             top_holdings = df_now.nlargest(20, '投資比例(%)')
             fig = px.bar(top_holdings, x='投資比例(%)', y='個股名稱', orientation='h', title="成分股權重前 20 大分佈", color='投資比例(%)', color_continuous_scale='Blues')
             fig.update_layout(yaxis={'categoryorder': 'total ascending'})
             st.plotly_chart(fig, use_container_width=True)
-            df_display = df_now.drop(columns=['ticker'], errors='ignore')
-            if '今日漲跌價' in df_display.columns: df_display['今日漲跌價'] = df_display['今日漲跌價'].apply(lambda x: f"{x:.2f}")
-            st.dataframe(df_display, use_container_width=True)
+            
+            # 2. 定義要顯示的欄位 (確保只留核心資訊)
+            # 如果你的 CSV 欄位名稱是 '持有股數' 或 '股數'，請確保這裡跟 CSV 內一致
+            target_cols = ['個股名稱', '持有股數', '投資比例(%)']
+            # 過濾掉不存在的欄位，防止錯誤
+            display_cols = [c for c in target_cols if c in df_now.columns]
+            
+            df_display = df_now[display_cols].copy()
+            
+            # 3. 顯示表格
+            st.dataframe(df_display, use_container_width=True, hide_index=True)
             
         with tab3:
             st.caption(f"🕒 資料更新時間: {m_time}")
