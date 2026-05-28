@@ -4,7 +4,8 @@ on:
   push:
     branches: [ main ]
   schedule:
-    - cron: '0 */2 * * *'  # 這裡修改為每兩小時執行一次
+    # 台灣時間 21:00 = UTC 13:00
+    - cron: '0 13 * * *'
   workflow_dispatch:
 
 permissions:
@@ -25,7 +26,6 @@ jobs:
           python-version: '3.9'
 
       - name: Install dependencies
-        # 移除了不需要的 yfinance 和 twstock 以節省時間
         run: pip install pandas requests lxml
 
       - name: Run fetch script
