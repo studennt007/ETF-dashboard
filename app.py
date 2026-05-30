@@ -129,16 +129,38 @@ else:
     with sub1:
         st.caption(f"🕒 資料更新時間: {m_time_all}")
         perf_data = []
+        today = pd.Timestamp.now(tz='Asia/Taipei') # 統一時區
+        
+        # 定義觀察區間：1週(7天), 1個月(30天), 3個月(90天)
+        intervals = {"1週": 7, "1個月": 30, "3個月": 90}
+        
         for etf in etf_list:
-            hist = yf.Ticker(f"{etf}.TW").history(period="6mo")
+            # 抓取一年資料確保歷史數據充裕
+            hist = yf.Ticker(f"{etf}.TW").history(period="1y")
+            
             row = {'ETF': etf}
-            for label, days in {"1週":5, "1個月":22, "3個月":66, "6個月":132}.items():
-                if len(hist) > days:
-                    curr, past = hist['Close'].iloc[-1], hist['Close'].iloc[-days]
-                    row[label] = f"{((curr - past) / past) * 100:.2f}%"
-                else: row[label] = "N/A"
+            if not hist.empty:
+                # 確保 Index 為時區感知的 Datetime
+                if hist.index.tz is None:
+                    hist.index = hist.index.tz_localize('Asia/Taipei')
+                
+                curr_price = hist['Close'].iloc[-1]
+                
+                for label, days in intervals.items():
+                    target_date = today - pd.Timedelta(days=days)
+                    # 尋找目標日期之前最後一筆交易記錄
+                    past_data = hist[hist.index <= target_date]
+                    
+                    if not past_data.empty:
+                        past_price = past_data['Close'].iloc[-1]
+                        perf = ((curr_price - past_price) / past_price) * 100
+                        row[label] = f"{perf:+.2f}%"
+                    else:
+                        row[label] = "資料不足"
+            else:
+                for label in intervals:
+                    row[label] = "無數據"
             perf_data.append(row)
-        st.table(pd.DataFrame(perf_data).set_index('ETF'))
     
     with sub2:
         st.caption(f"🕒 資料更新時間: {m_time_all}")
