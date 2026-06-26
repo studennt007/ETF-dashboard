@@ -196,7 +196,7 @@ def render_home_page(overview_list):
     # 主頁專屬框框提示說明
     st.markdown("""
         <div class="custom-notice-box">
-            💡 <strong>使用提示：</strong>點選下方表格清單中的 <strong>ETF名稱</strong> ，即可自由進入切換查看該檔 ETF 的「完整成分股明細」與「持股增減異動」。
+            💡 <strong>使用提示：</strong>點選下方表格清單中的 <strong>ETF名稱</strong> 藍色連結，即可自由進入切換查看該檔 ETF 的「完整成分股明細」與「持股增減異動」。
         </div>
     """, unsafe_allow_html=True)
     
@@ -369,41 +369,92 @@ def render_single_etf():
 # ==========================================
 def render_market_analysis():
     st.title("🌐 多檔市場綜合分析面板")
-    sub1, sub2, sub3 = st.tabs(["📈 跨週期績效分析", "🔄 共同調倉", "🤝 共同持股"])
+    sub1, sub2, sub3 = st.tabs(["📈 跨週期績效分析", "🔄 共同調倉共振分析", "🤝 投信全方位共同持股總表"])
     
     with sub1:
         st.write(f"資料更新時間：{today_str}")
-        
-        # 修正：加入跨週期績效分析的框框
         st.markdown("""
             <div class="custom-notice-box">
-                💡 <strong>使用提示：</strong>切換下方時間區間標籤，即可動態對比各主動式 ETF 的累積波段績效排名。
+                💡 <strong>嚴格區間對比提示：</strong> 系統已自動加入 <strong>0050 元大台灣50</strong> 作為市場基準線（Benchmark）。<br>
+                ⚠️ <strong>存活過濾機制：</strong>為確保對比公平性，<strong>若 ETF 上市時間未滿所選區間，將自動隱藏不予評比</strong>，避免剛上市新股造成數據失真。
             </div>
         """, unsafe_allow_html=True)
         
         perf_data = []
+        # 定義每個區間「理論上最少需要具備的交易日天數」（扣除例假日，保守估計）
+        min_days_map = {"1週": 4, "1個月": 15, "3個月": 50, "6個月": 100}
         period_map = {"1週": "7d", "1個月": "1mo", "3個月": "3mo", "6個月": "6mo"}
         chart_period = st.radio("選擇圖表對比區間", list(period_map.keys()), horizontal=True, key="analysis_perf_period")
         
+        # 1. 先抓取 0050 作為大盤基準線
+        df_0050 = load_price_data("0050", period=period_map[chart_period])
+        benchmark_perf = 0.0
+        if not df_0050.empty and len(df_0050) >= 2:
+            first_b = df_0050['Close'].iloc[0]
+            last_b = df_0050['Close'].iloc[-1]
+            benchmark_perf = round(((last_b - first_b) / first_b) * 100, 2)
+            
+        # 將大盤放進資料清單中
+        perf_data.append({'ETF': "📌 0050 元大台灣50 (大盤)", '績效(%)': benchmark_perf, '類型': '大盤基準'})
+        
+        # 2. 抓取其餘主動式 ETF 的績效（加入嚴格天數過濾）
+        required_min_days = min_days_map[chart_period]
+        
         for etf in etf_list:
             hist = load_price_data(etf, period=period_map[chart_period])
+            
+            # 【核心邏輯】：如果這檔 ETF 回傳的歷史 K 線天數小於要求的天數，代表它在這個區間根本還沒上市或資料不足，直接跳過！
+            if hist.empty or len(hist) < required_min_days:
+                continue
+                
             etf_display_name = etf_names.get(etf, etf)
-            row = {'ETF': etf_display_name, '績效(%)': 0.0}
-            if len(hist) >= 2:
-                first_p = hist['Close'].iloc[0]
-                last_p = hist['Close'].iloc[-1]
-                row['績效(%)'] = round(((last_p - first_p) / first_p) * 100, 2)
+            row = {'ETF': etf_display_name, '績效(%)': 0.0, '類型': '主動式 ETF'}
+            
+            first_p = hist['Close'].iloc[0]
+            last_p = hist['Close'].iloc[-1]
+            row['績效(%)'] = round(((last_p - first_p) / first_p) * 100, 2)
             perf_data.append(row)
             
         df_perf = pd.DataFrame(perf_data)
-        if not df_perf.empty:
+        
+        # 如果除了大盤以外，沒有任何主動式 ETF 滿足這個時間條件
+        if len(df_perf) <= 1:
+            st.warning(f"目前沒有任何主動式 ETF 的上市時間滿足「{chart_period}」的要求。")
+        else:
+            # 依據績效由高到低排序
             df_plot = df_perf.sort_values('績效(%)', ascending=False)
-            fig_perf = px.bar(df_plot, x='ETF', y='績效(%)', text='績效(%)', color='績效(%)', color_continuous_scale='RdYlGn')
+            
+            # 繪製長條圖
+            fig_perf = px.bar(
+                df_plot, 
+                x='ETF', 
+                y='績效(%)', 
+                text='績效(%)', 
+                color='類型',
+                color_discrete_map={"大盤基準": "#f59e0b", "主動式 ETF": "#38bdf8"},
+                title=f"近 {chart_period} 累積績效 vs 0050 大盤對比 (已過濾剛上市不符資格者)"
+            )
+            
+            # 在圖中加上一條水平虛線穿過 0050
+            fig_perf.add_hline(
+                y=benchmark_perf, 
+                line_dash="dash", 
+                line_color="#f59e0b", 
+                annotation_text=f" 0050 大盤線 ({benchmark_perf:+.2f}%)", 
+                annotation_position="top left"
+            )
+            
             fig_perf.update_traces(texttemplate='%{text}%', textposition='outside')
-            fig_perf.update_layout(xaxis_tickangle=-45, yaxis=dict(ticksuffix="%"), height=500, template='plotly_dark')
+            fig_perf.update_layout(xaxis_tickangle=-45, yaxis=dict(ticksuffix="%"), height=550, template='plotly_dark')
             st.plotly_chart(fig_perf, use_container_width=True)
-            st.dataframe(df_plot.set_index('ETF'), use_container_width=True)
-
+            
+            # 數據表計算超額報酬
+            df_table = df_plot.copy()
+            df_table['領先大盤(%)'] = df_table['績效(%)'] - benchmark_perf
+            df_table['領先大盤(%)'] = df_table['領先大盤(%)'].apply(lambda x: f"{x:+.2f}%" if x != 0 else "-")
+            df_table['績效(%)'] = df_table['績效(%)'].apply(lambda x: f"{x:+.2f}%")
+            
+            st.dataframe(df_table.set_index('ETF')[['類型', '績效(%)', '領先大盤(%)']], use_container_width=True)
     with sub2:
         st.write(f"資料更新時間：{m_time_global}")
         all_changes = []
@@ -428,7 +479,7 @@ def render_market_analysis():
             
             with c1:
                 # 【優化】利用 HTML 置頂大標題，配合全域 Column CSS 達到絕對水平齊頭
-                st.markdown('<div class="alignment-title-large">📈 同步加碼 </div>', unsafe_allow_html=True)
+                st.markdown('<div class="alignment-title-large">📈 同步加碼</div>', unsafe_allow_html=True)
                 buy_grouped = buy_raw.groupby('個股名稱').size().reset_index(name='涉及ETF數量')
                 buy_grouped = buy_grouped[buy_grouped['涉及ETF數量'] >= 2].sort_values('涉及ETF數量', ascending=False)
                 with st.container(height=SYNC_PANEL_HEIGHT, border=True):
@@ -442,7 +493,7 @@ def render_market_analysis():
                         st.write("目前無符合 2 家以上同步買進的標的。")
 
             with c2:
-                st.markdown('<div class="alignment-title-large">📉 同步減碼 </div>', unsafe_allow_html=True)
+                st.markdown('<div class="alignment-title-large">📉 同步減碼</div>', unsafe_allow_html=True)
                 sell_grouped = sell_raw.groupby('個股名稱').size().reset_index(name='涉及ETF數量')
                 sell_grouped = sell_grouped[sell_grouped['涉及ETF數量'] >= 2].sort_values('涉及ETF數量', ascending=False)
                 with st.container(height=SYNC_PANEL_HEIGHT, border=True):
