@@ -28,7 +28,10 @@ etf_data = {
     "00999A": "https://www.moneydj.com/ETF/X/Basic/Basic0007B.xdjhtm?etfid=00999A.TW",
     "00405A": "https://www.moneydj.com/ETF/X/Basic/Basic0007B.xdjhtm?etfid=00405A.TW",
     "00407A": "https://www.moneydj.com/ETF/X/Basic/Basic0007B.xdjhtm?etfid=00407A.TW",
-    "00406A": "https://www.moneydj.com/ETF/X/Basic/Basic0007B.xdjhtm?etfid=00406A.TW"
+    "00406A": "https://www.moneydj.com/ETF/X/Basic/Basic0007B.xdjhtm?etfid=00406A.TW",
+    "00984A": "https://www.moneydj.com/ETF/X/Basic/Basic0007B.xdjhtm?etfid=00984A.TW",
+    "00404A": "https://www.moneydj.com/ETF/X/Basic/Basic0007B.xdjhtm?etfid=00404A.TW",
+
 }
 
 headers = {'User-Agent': 'Mozilla/5.0'}
