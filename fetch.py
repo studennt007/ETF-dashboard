@@ -92,7 +92,7 @@ for code, url in etf_data.items():
         )
 
         # 僅保留需要的欄位
-        output_df = df[['個股名稱', '持有股數', '投資比例(%)', 'ticker']]
+        output_df = df[['個股名稱', '持有股數 / 口數', '投資比例(%)', 'ticker']]
 
         output_df.to_csv(output_path, index=False, encoding='utf-8-sig')
 
