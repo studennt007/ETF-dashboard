@@ -1003,8 +1003,8 @@ def render_market_analysis():
         else:
             st.warning("⚠️ 目前沒有任何 ETF 的歷史資料滿足所選區間，請改選較近的天數或日期。")
 
-   with sub3:
-       st.caption(f"📁 資料更新時間：{m_time_global}")
+    with sub3:
+        st.caption(f"📁 資料更新時間：{m_time_global}")
 
     dfs = []
     for etf in etf_list:
