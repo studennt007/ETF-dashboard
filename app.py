@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import datetime
 
 # --- 頁面初始配置 ---
-st.set_page_config(page_title="Active ETF 監控系統", layout="wide", page_icon="📊")
+st.set_page_config(page_title="主動式ETF 監控系統", layout="wide", page_icon="📊")
 
 # --- CSS 注入（優化版：卡片化 / 間距 / hover / 陰影） ---
 st.markdown("""
@@ -433,7 +433,7 @@ st.sidebar.caption(f"📁 持股資料日期：{m_time_global}")
 # ==========================================
 # 模組化功能 1: 原始 Yahoo Finance 歷史行情加載 (含 .TWO fallback 與防呆)
 # ==========================================
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def load_price_data(etf_code, period="2d"):
     """
     嘗試抓取 ETF 歷史股價。
@@ -565,7 +565,7 @@ def render_home_page(overview_list):
         return f"<span class='text-stable'>0.00%</span>"
 
     with lb_up:
-        st.markdown('<div class="alignment-title-large" style="font-size:18px;">🔥 今日漲幅 TOP5</div>', unsafe_allow_html=True)
+        st.markdown('<div class="alignment-title-large" style="font-size:18px;">🔥 今日強勢 TOP5</div>', unsafe_allow_html=True)
         for r in top_up:
             st.markdown(
                 f"<div style='display:flex;justify-content:space-between;padding:4px 8px;'>"
@@ -573,7 +573,7 @@ def render_home_page(overview_list):
                 unsafe_allow_html=True,
             )
     with lb_down:
-        st.markdown('<div class="alignment-title-large" style="font-size:18px;">🧊 今日跌幅 TOP5</div>', unsafe_allow_html=True)
+        st.markdown('<div class="alignment-title-large" style="font-size:18px;">🧊 今日弱勢 TOP5</div>', unsafe_allow_html=True)
         for r in top_down:
             st.markdown(
                 f"<div style='display:flex;justify-content:space-between;padding:4px 8px;'>"
