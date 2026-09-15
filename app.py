@@ -531,7 +531,7 @@ def render_home_page(overview_list):
 
     st.markdown("""
         <div class="custom-notice-box">
-            💡 <strong>使用提示：</strong>點下方每一列右側的 <strong>「查看詳情 →」</strong> 按鈕，即可切換查看該檔 ETF 的「完整成分股明細」與「持股增減異動」。
+            💡 <strong>使用提示：</strong>點下方每一列右側的 <strong>「查看詳情 →」</strong> 按鈕，即可切換查看該檔 ETF 的「完整成分股明細」與「持股增減異動」。部分股價可能因 yfinance 資料來源處理延遲或異常，導致與即時市價有些微落差，僅供參考，請以證交所或各大券商之實際報價為準。        
         </div>
     """, unsafe_allow_html=True)
 
