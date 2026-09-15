@@ -1003,44 +1003,78 @@ def render_market_analysis():
         else:
             st.warning("⚠️ 目前沒有任何 ETF 的歷史資料滿足所選區間，請改選較近的天數或日期。")
 
-    with sub3:
-        st.caption(f"📁 資料更新時間：{m_time_global}")
+   with sub3:
+       st.caption(f"📁 資料更新時間：{m_time_global}")
 
-        dfs = []
-        for etf in etf_list:
-            matching_files = [f for f in files if f.startswith(etf)]
-            if not matching_files:
-                continue
-            f_latest = matching_files[0]
-            df = pd.read_csv(os.path.join(data_dir, f_latest), encoding='utf-8-sig')
-            df['個股名稱'] = df['個股名稱'].astype(str).str.strip()
-            df['投資比例(%)'] = pd.to_numeric(df['投資比例(%)'], errors='coerce').fillna(0)
-            df = df[['個股名稱', '投資比例(%)']]
-            df.columns = ['個股名稱', etf]
-            dfs.append(df)
+    dfs = []
+    for etf in etf_list:
+        matching_files = [f for f in files if f.startswith(etf)]
+        if not matching_files:
+            continue
+        f_latest = matching_files[0]
+        df = pd.read_csv(os.path.join(data_dir, f_latest), encoding='utf-8-sig')
+        df['個股名稱'] = df['個股名稱'].astype(str).str.strip()
+        
+        # 轉為數值（解析失敗者設為 NaN）
+        df['投資比例(%)'] = pd.to_numeric(df['投資比例(%)'], errors='coerce')
+        
+        # 保留有效列，並建立該 ETF 持有標記 (Flag = True)
+        df = df[df['個股名稱'].str.len() > 0][['個股名稱', '投資比例(%)']]
+        df['持有標記'] = True
+        df.columns = ['個股名稱', etf, f"{etf}_flag"]
+        dfs.append(df)
 
-        if dfs:
-            df_total = reduce(lambda left, right: pd.merge(left, right, on='個股名稱', how='outer'), dfs).fillna(0)
-            etf_cols = [c for c in df_total.columns if c != '個股名稱']
+    if dfs:
+        # 合併所有 ETF 資料
+        df_total = reduce(lambda left, right: pd.merge(left, right, on='個股名稱', how='outer'), dfs)
+        
+        etf_cols = [c for c in df_total.columns if c != '個股名稱' and not c.endswith('_flag')]
+        flag_cols = [c for c in df_total.columns if c.endswith('_flag')]
 
-            df_total['持有投信數'] = (df_total[etf_cols] > 0).sum(axis=1)
-            df_total['核心標記'] = df_total.apply(lambda r: "★" if all(r[col] > 1.0 for col in etf_cols if r[col] > 0) else "", axis=1)
+        # 1. 填補 Flag 欄位：有在清單內為 True，否則為 False
+        df_total[flag_cols] = df_total[flag_cols].fillna(False)
 
-            for col in etf_cols:
-                df_total[col] = df_total[col].apply(lambda x: f"{x:.2f}%" if x > 0 else "-")
+        # 2. 計算真正的「持有投信數」
+        df_total['持有投信數'] = df_total[flag_cols].sum(axis=1)
 
-            view_cols = ['核心標記', '持有投信數', '個股名稱'] + etf_cols
-            df_disp = df_total[view_cols].sort_values('持有投信數', ascending=False)
+        # 核心過濾：只保留被 2 家（含）以上投信共同持有的股票
+        df_total = df_total[df_total['持有投信數'] >= 2].copy()
 
-            st.subheader("📋 主動式投信機構共同持股總表")
+        # 3. 填補未持有的比例為 0，方便數值計算
+        df_total[etf_cols] = df_total[etf_cols].fillna(0)
 
-            st.markdown("""
-                <div class="custom-notice-box">
-                    📝 <strong>【標記說明】</strong> ★ 核心標記：代表該股票在所有買進它的主動式 ETF 中持股皆大於 1.00% ｜ 持有投信數：代表該股票被多少家主動式 ETF 納入成分股
-                </div>
-            """, unsafe_allow_html=True)
+        # 4. 計算核心標記 (★)：有買進該股票的 ETF 中，投資比例是否「全都 > 1.00%」
+        def check_core(row):
+            # 取出該股票被哪些 ETF 真正持有
+            held_etfs = [col for col in etf_cols if row[f"{col}_flag"]]
+            # 檢查有持有的 ETF 比例是否皆 > 1.00%
+            if held_etfs and all(row[col] > 1.0 for col in held_etfs):
+                return "★"
+            return ""
 
-            st.dataframe(df_disp, use_container_width=True, hide_index=True)
+        df_total['核心標記'] = df_total.apply(check_core, axis=1)
+
+        # 5. 格式化顯示：有持有的顯示 % 數，未持有的顯示 "-"
+        for col in etf_cols:
+            flag_col = f"{col}_flag"
+            df_total[col] = df_total.apply(
+                lambda r: f"{r[col]:.2f}%" if r[flag_col] else "-", 
+                axis=1
+            )
+
+        # 整理最終顯示欄位
+        view_cols = ['核心標記', '持有投信數', '個股名稱'] + etf_cols
+        df_disp = df_total[view_cols].sort_values('持有投信數', ascending=False)
+
+        st.subheader("📋 主動式投信機構共同持股總表")
+
+        st.markdown("""
+            <div class="custom-notice-box">
+                📝 <strong>【標記說明】</strong> ★ 核心標記：代表該股票在所有買進它的主動式 ETF 中持股皆大於 1.00% ｜ 持有投信數：代表該股票被多少家主動式 ETF 納入成分股（僅列出被 2 家以上共同持有的標的）
+            </div>
+        """, unsafe_allow_html=True)
+
+        st.dataframe(df_disp, use_container_width=True, hide_index=True)
 
     with sub4:
         st.caption(f"📁 資料更新時間：{m_time_global}")
