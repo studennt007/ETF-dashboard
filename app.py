@@ -223,28 +223,11 @@ def pill_selector(label, options, key, horizontal=True):
 
 
 def render_period_selector(key_prefix, available_date_strs):
-    """畫出『1天/5天/10天/20天/自訂日期』選擇器，回傳 (period_days, custom_date_str)"""
-    options = ["1天", "5天", "10天", "20天", "自訂日期"]
+    """畫出『1天/5天/10天/20天』選擇器，回傳 (period_days, custom_date_str)"""
+    options = ["1天", "5天", "10天", "20天"]
     choice = pill_selector("比較基準區間", options, key_prefix)
     period_map = {"1天": 1, "5天": 5, "10天": 10, "20天": 20}
-
-    if choice == "自訂日期":
-        sorted_dates = sorted(available_date_strs)
-        if not sorted_dates:
-            st.warning("目前沒有可用的歷史資料日期。")
-            return 1, None
-        min_d = datetime.datetime.strptime(sorted_dates[0], '%Y%m%d').date()
-        max_d = datetime.datetime.strptime(sorted_dates[-1], '%Y%m%d').date()
-        picked = st.date_input(
-            "選擇比較基準日期",
-            value=min_d,
-            min_value=min_d,
-            max_value=max_d,
-            key=f"{key_prefix}_date_input"
-        )
-        return None, picked.strftime('%Y%m%d')
-    else:
-        return period_map[choice], None
+    return period_map[choice], None
 
 
 def render_risk_metrics_explainer():
