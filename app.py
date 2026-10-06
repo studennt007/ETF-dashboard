@@ -7,6 +7,10 @@ import yfinance as yf
 from functools import reduce
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import datetime
+import json
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 # --- 頁面初始配置 ---
 st.set_page_config(page_title="主動式ETF 監控系統", layout="wide", page_icon="📊")
@@ -360,8 +364,9 @@ def build_stock_trend(stock_name, etf_codes_tuple, files_tuple, data_dir_str, ma
 
 # 持股資料的「最新資料日期」(用於成分股/持股增減/共同調倉等 CSV-based 區塊顯示)
 m_time_global = get_date_from_filename(files[0]) if files else "未知日期"
-# 即時股價資料一律顯示「系統當下日期」(用於行情大盤/單檔K線/績效分析等 yfinance-based 區塊)
-today_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+# 此處明確表示「本次頁面更新時間」，而非推測的收盤時間。
+# 日線資料本身只保證交易日期，無法在提早收市、休市或來源延遲時安全斷言為 13:30。
+today_str = datetime.datetime.now(ZoneInfo("Asia/Taipei")).strftime('%Y-%m-%d %H:%M')
 
 # --- 初始化 Session State 狀態機 ---
 if "current_page" not in st.session_state:
@@ -409,45 +414,139 @@ if quick_pick:
         st.rerun()
 
 st.sidebar.markdown("---")
-st.sidebar.caption(f"⏱️ 股價資料時間：{today_str}")
+st.sidebar.caption(f"⏱️ 股價資料更新時間：{today_str}")
 st.sidebar.caption(f"📁 持股資料日期：{m_time_global}")
 
 
 # ==========================================
 # 模組化功能 1: 原始 Yahoo Finance 歷史行情加載 (含 .TWO fallback 與防呆)
 # ==========================================
+TAIPEI_TZ = ZoneInfo("Asia/Taipei")
+
+
+def _normalise_daily_history(hist):
+    """統一日線索引為台北日期，避免時區或重複列造成抓錯前一交易日。"""
+    if hist is None or hist.empty:
+        return pd.DataFrame()
+
+    clean = hist.copy()
+    idx = pd.DatetimeIndex(pd.to_datetime(clean.index))
+    if idx.tz is not None:
+        idx = idx.tz_convert(TAIPEI_TZ).tz_localize(None)
+    clean.index = idx.normalize()
+    clean = clean[~clean.index.duplicated(keep='last')].sort_index()
+    return clean.dropna(subset=['Close']) if 'Close' in clean.columns else pd.DataFrame()
+
+
+def _twse_monthly_prices(etf_code, year, month):
+    """讀取證交所單月日成交資料；失敗時回傳空表，讓 Yahoo 資料維持可用。"""
+    params = urlencode({
+        'response': 'json',
+        'date': f'{year}{month:02d}01',
+        'stockNo': etf_code,
+    })
+    request = Request(
+        f'https://www.twse.com.tw/exchangeReport/STOCK_DAY?{params}',
+        headers={'User-Agent': 'Mozilla/5.0'},
+    )
+    try:
+        with urlopen(request, timeout=8) as response:
+            payload = json.loads(response.read().decode('utf-8-sig'))
+    except Exception:
+        return pd.DataFrame()
+
+    rows = []
+    for values in payload.get('data', []):
+        # 證交所欄位順序：日期、成交股數、成交金額、開、高、低、收、漲跌、成交筆數。
+        if len(values) < 8:
+            continue
+        try:
+            roc_year, month_text, day_text = values[0].replace(' ', '').split('/')
+            trade_date = datetime.datetime(int(roc_year) + 1911, int(month_text), int(day_text))
+            as_number = lambda value: float(str(value).replace(',', '').strip())
+            close = as_number(values[6])
+            if close <= 0:
+                continue
+            rows.append({
+                'Date': trade_date,
+                'Open': as_number(values[3]),
+                'High': as_number(values[4]),
+                'Low': as_number(values[5]),
+                'Close': close,
+                'Volume': int(as_number(values[1])),
+            })
+        except (TypeError, ValueError, IndexError):
+            continue
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).set_index('Date').sort_index()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_twse_recent_eod(etf_code):
+    """取得本月與上月的證交所收盤資料，跨月時仍可正確找出前一交易日。"""
+    today = datetime.datetime.now(TAIPEI_TZ).date()
+    previous_month = today.month - 1 or 12
+    previous_year = today.year if today.month > 1 else today.year - 1
+    frames = [
+        _twse_monthly_prices(etf_code, today.year, today.month),
+        _twse_monthly_prices(etf_code, previous_year, previous_month),
+    ]
+    frames = [frame for frame in frames if not frame.empty]
+    if not frames:
+        return pd.DataFrame()
+    official = pd.concat(frames)
+    return official[~official.index.duplicated(keep='last')].sort_index()
+
+
+def _merge_official_eod(hist, etf_code):
+    """以證交所收盤價覆蓋最近交易日，並補回 Yahoo 暫時遺漏的日線。"""
+    official = load_twse_recent_eod(etf_code)
+    if official.empty:
+        return hist
+    if hist.empty:
+        return official
+    # combine_first 以呼叫端為主：證交所資料優先，Yahoo 補足較早歷史及其他欄位。
+    return official.combine_first(hist).sort_index()
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def load_price_data(etf_code, period="2d"):
     """
-    嘗試抓取 ETF 歷史股價。
-    1. 若要求 period 為 1d/2d，改用 5d 抓取避免假日/休市造成資料不足，再裁切回最後 2 筆。
-    2. 先嘗試 .TW (上市)，若抓不到或筆數不足，再嘗試 .TWO (上櫃) 作為 fallback。
-    快取時間拉長至 300 秒，減少重複請求造成的頁面延遲。
+    讀取未調整日線收盤價。
+
+    行情看板需要比較「最新交易日收盤」與「前一交易日收盤」，因此以證交所
+    EOD 補齊 Yahoo 暫時缺少的交易日；不再以自動調整後的 Close 或跨日資料計算。
     """
     def _try_fetch(suffix, fetch_period):
         try:
             ticker = yf.Ticker(f"{etf_code}{suffix}")
-            hist = ticker.history(period=fetch_period)
-            if hist is not None and not hist.empty and 'Close' in hist.columns:
-                return hist.dropna(subset=['Close'])
-            return pd.DataFrame()
+            hist = ticker.history(
+                period=fetch_period,
+                interval='1d',
+                auto_adjust=False,
+                actions=False,
+                repair=True,
+            )
+            return _normalise_daily_history(hist)
         except Exception:
             return pd.DataFrame()
 
-    fetch_period = "5d" if period in ("1d", "2d") else period
-
-    hist = _try_fetch(".TW", fetch_period)
+    # 1mo 是 yfinance 支援的有效區間，能避免 5d 窗口剛好略過前一交易日。
+    fetch_period = '1mo' if period in ('1d', '2d') else period
+    hist = _try_fetch('.TW', fetch_period)
     if len(hist) < 2:
-        hist_two = _try_fetch(".TWO", fetch_period)
+        hist_two = _try_fetch('.TWO', fetch_period)
         if len(hist_two) > len(hist):
             hist = hist_two
 
+    hist = _merge_official_eod(hist, etf_code)
     if hist.empty:
         return hist
 
-    if period in ("1d", "2d") and len(hist) > 2:
-        hist = hist.tail(2)
-
+    if period in ('1d', '2d'):
+        return hist.tail(2)
     return hist
 
 
@@ -480,7 +579,11 @@ def build_overview_data(etf_codes):
     for etf in etf_codes:
         hist = hist_map.get(etf, pd.DataFrame())
         etf_display_name = etf_names.get(etf, etf)
-        row = {"代碼": etf, "ETF名稱": etf_display_name, "最新價": 0.0, "漲跌價": 0.0, "漲跌幅": 0.0, "成交量": 0}
+        row = {
+            "代碼": etf, "ETF名稱": etf_display_name,
+            "最新價": 0.0, "漲跌價": 0.0, "漲跌幅": 0.0, "成交量": 0,
+            "資料日期": None,
+        }
 
         if len(hist) >= 2:
             last = hist.iloc[-1]
@@ -492,9 +595,11 @@ def build_overview_data(etf_codes):
             row["漲跌價"] = round(float(change), 2)
             row["漲跌幅"] = round(float(pct), 2)
             row["成交量"] = int(last['Volume']) if 'Volume' in last and pd.notna(last['Volume']) else 0
+            row["資料日期"] = pd.Timestamp(last.name).strftime('%Y-%m-%d')
         elif len(hist) == 1:
             last = hist.iloc[-1]
             row["最新價"] = round(float(last['Close']), 2)
+            row["資料日期"] = pd.Timestamp(last.name).strftime('%Y-%m-%d')
             failed_etfs.append(etf)
         else:
             failed_etfs.append(etf)
