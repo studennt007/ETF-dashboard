@@ -680,7 +680,7 @@ def render_home_page(overview_list):
         return f"<span class='text-stable'>0.00%</span>"
 
     with lb_up:
-        st.markdown('<div class="alignment-title-large" style="font-size:18px;">🔥 今日漲幅 TOP5</div>', unsafe_allow_html=True)
+        st.markdown('<div class="alignment-title-large" style="font-size:18px;">🔥 今日強勢 TOP5</div>', unsafe_allow_html=True)
         for r in top_up:
             st.markdown(
                 f"<div style='display:flex;justify-content:space-between;padding:4px 8px;'>"
@@ -688,7 +688,7 @@ def render_home_page(overview_list):
                 unsafe_allow_html=True,
             )
     with lb_down:
-        st.markdown('<div class="alignment-title-large" style="font-size:18px;">🧊 今日跌幅 TOP5</div>', unsafe_allow_html=True)
+        st.markdown('<div class="alignment-title-large" style="font-size:18px;">🧊 今日弱勢 TOP5</div>', unsafe_allow_html=True)
         for r in top_down:
             st.markdown(
                 f"<div style='display:flex;justify-content:space-between;padding:4px 8px;'>"
