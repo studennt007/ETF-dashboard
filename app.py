@@ -7,13 +7,10 @@ import yfinance as yf
 from functools import reduce
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import datetime
-import json
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 # --- 頁面初始配置 ---
-st.set_page_config(page_title="主動式ETF 監控系統", layout="wide", page_icon="📊")
+st.set_page_config(page_title="Active ETF 監控系統", layout="wide", page_icon="📊")
 
 # --- CSS 注入（優化版：卡片化 / 間距 / hover / 陰影） ---
 st.markdown("""
@@ -227,11 +224,28 @@ def pill_selector(label, options, key, horizontal=True):
 
 
 def render_period_selector(key_prefix, available_date_strs):
-    """畫出『1天/5天/10天/20天』選擇器，回傳 (period_days, custom_date_str)"""
-    options = ["1天", "5天", "10天", "20天"]
+    """畫出『1天/5天/10天/20天/自訂日期』選擇器，回傳 (period_days, custom_date_str)"""
+    options = ["1天", "5天", "10天", "20天", "自訂日期"]
     choice = pill_selector("比較基準區間", options, key_prefix)
     period_map = {"1天": 1, "5天": 5, "10天": 10, "20天": 20}
-    return period_map[choice], None
+
+    if choice == "自訂日期":
+        sorted_dates = sorted(available_date_strs)
+        if not sorted_dates:
+            st.warning("目前沒有可用的歷史資料日期。")
+            return 1, None
+        min_d = datetime.datetime.strptime(sorted_dates[0], '%Y%m%d').date()
+        max_d = datetime.datetime.strptime(sorted_dates[-1], '%Y%m%d').date()
+        picked = st.date_input(
+            "選擇比較基準日期",
+            value=min_d,
+            min_value=min_d,
+            max_value=max_d,
+            key=f"{key_prefix}_date_input"
+        )
+        return None, picked.strftime('%Y%m%d')
+    else:
+        return period_map[choice], None
 
 
 def render_risk_metrics_explainer():
@@ -263,21 +277,42 @@ def compute_risk_metrics(hist: pd.DataFrame) -> dict:
     if hist is None or len(hist) < 3:
         return {"vol": None, "mdd": None, "sharpe": None, "win_rate": None}
 
-    close = hist['Close'].dropna()
+    close = hist['Close'].dropna().sort_index()
     returns = close.pct_change().dropna()
     if returns.empty:
         return {"vol": None, "mdd": None, "sharpe": None, "win_rate": None}
 
     annual_vol = returns.std() * (252 ** 0.5) * 100
-    cum = (1 + returns).cumprod()
-    running_max = cum.cummax()
-    drawdown = (cum - running_max) / running_max
+    # 必須把期初淨值納入高點。若從 100 先跌到 90，原先的寫法會把
+    # 90 當作第一個高點而得到 0% MDD，這不符合最大回撤的定義。
+    nav = close / close.iloc[0]
+    running_max = nav.cummax()
+    drawdown = nav / running_max - 1
     mdd = drawdown.min() * 100
     mean_daily = returns.mean()
     sharpe = (mean_daily / returns.std()) * (252 ** 0.5) if returns.std() != 0 else 0.0
     win_rate = (returns > 0).sum() / len(returns) * 100
 
     return {"vol": annual_vol, "mdd": mdd, "sharpe": sharpe, "win_rate": win_rate}
+
+
+def calculate_return(close: pd.Series) -> float | None:
+    """以同一段、已對齊的收盤價計算累積報酬率（百分比）。"""
+    close = close.dropna()
+    if len(close) < 2 or close.iloc[0] == 0:
+        return None
+    return (close.iloc[-1] / close.iloc[0] - 1) * 100
+
+
+def align_price_history(benchmark: pd.DataFrame, asset: pd.DataFrame) -> pd.DataFrame:
+    """以共同交易日對齊基準與 ETF，避免各自取不同的起訖日來比較績效。"""
+    if benchmark.empty or asset.empty:
+        return pd.DataFrame(columns=["benchmark", "asset"])
+    return pd.concat(
+        [benchmark["Close"].rename("benchmark"), asset["Close"].rename("asset")],
+        axis=1,
+        join="inner",
+    ).dropna().sort_index()
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -307,7 +342,11 @@ def build_overlap_matrix(etf_codes_tuple, files_tuple, data_dir_str):
     n = len(codes)
     matrix = pd.DataFrame(0.0, index=codes, columns=codes)
 
-    weight_maps = {c: dict(zip(holdings[c]['個股名稱'], holdings[c]['投資比例(%)'])) for c in codes}
+    # 同名項目若在來源檔被拆成多列，先加總，避免 dict 只保留最後一列。
+    weight_maps = {
+        c: holdings[c].groupby('個股名稱')['投資比例(%)'].sum().to_dict()
+        for c in codes
+    }
 
     for i in range(n):
         for j in range(n):
@@ -364,8 +403,8 @@ def build_stock_trend(stock_name, etf_codes_tuple, files_tuple, data_dir_str, ma
 
 # 持股資料的「最新資料日期」(用於成分股/持股增減/共同調倉等 CSV-based 區塊顯示)
 m_time_global = get_date_from_filename(files[0]) if files else "未知日期"
-# 此處明確表示「本次頁面更新時間」，而非推測的收盤時間。
-# 日線資料本身只保證交易日期，無法在提早收市、休市或來源延遲時安全斷言為 13:30。
+# 即時股價資料一律顯示「系統當下日期」(用於行情大盤/單檔K線/績效分析等 yfinance-based 區塊)
+# 部署主機可能使用 UTC；明確指定台北時區，避免畫面比台灣時間慢 8 小時。
 today_str = datetime.datetime.now(ZoneInfo("Asia/Taipei")).strftime('%Y-%m-%d %H:%M')
 
 # --- 初始化 Session State 狀態機 ---
@@ -414,150 +453,85 @@ if quick_pick:
         st.rerun()
 
 st.sidebar.markdown("---")
-st.sidebar.caption(f"⏱️ 股價資料更新時間：{today_str}")
+st.sidebar.caption(f"⏱️ 股價資料時間：{today_str}")
 st.sidebar.caption(f"📁 持股資料日期：{m_time_global}")
 
 
 # ==========================================
 # 模組化功能 1: 原始 Yahoo Finance 歷史行情加載 (含 .TWO fallback 與防呆)
 # ==========================================
-TAIPEI_TZ = ZoneInfo("Asia/Taipei")
-
-
-def _normalise_daily_history(hist):
-    """統一日線索引為台北日期，避免時區或重複列造成抓錯前一交易日。"""
-    if hist is None or hist.empty:
-        return pd.DataFrame()
-
-    clean = hist.copy()
-    idx = pd.DatetimeIndex(pd.to_datetime(clean.index))
-    if idx.tz is not None:
-        idx = idx.tz_convert(TAIPEI_TZ).tz_localize(None)
-    clean.index = idx.normalize()
-    clean = clean[~clean.index.duplicated(keep='last')].sort_index()
-    return clean.dropna(subset=['Close']) if 'Close' in clean.columns else pd.DataFrame()
-
-
-def _twse_monthly_prices(etf_code, year, month):
-    """讀取證交所單月日成交資料；失敗時回傳空表，讓 Yahoo 資料維持可用。"""
-    params = urlencode({
-        'response': 'json',
-        'date': f'{year}{month:02d}01',
-        'stockNo': etf_code,
-    })
-    request = Request(
-        f'https://www.twse.com.tw/exchangeReport/STOCK_DAY?{params}',
-        headers={'User-Agent': 'Mozilla/5.0'},
-    )
-    try:
-        with urlopen(request, timeout=8) as response:
-            payload = json.loads(response.read().decode('utf-8-sig'))
-    except Exception:
-        return pd.DataFrame()
-
-    rows = []
-    for values in payload.get('data', []):
-        # 證交所欄位順序：日期、成交股數、成交金額、開、高、低、收、漲跌、成交筆數。
-        if len(values) < 8:
-            continue
-        try:
-            roc_year, month_text, day_text = values[0].replace(' ', '').split('/')
-            trade_date = datetime.datetime(int(roc_year) + 1911, int(month_text), int(day_text))
-            as_number = lambda value: float(str(value).replace(',', '').strip())
-            close = as_number(values[6])
-            if close <= 0:
-                continue
-            rows.append({
-                'Date': trade_date,
-                'Open': as_number(values[3]),
-                'High': as_number(values[4]),
-                'Low': as_number(values[5]),
-                'Close': close,
-                'Volume': int(as_number(values[1])),
-            })
-        except (TypeError, ValueError, IndexError):
-            continue
-
-    if not rows:
-        return pd.DataFrame()
-    return pd.DataFrame(rows).set_index('Date').sort_index()
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def load_twse_recent_eod(etf_code):
-    """取得本月與上月的證交所收盤資料，跨月時仍可正確找出前一交易日。"""
-    today = datetime.datetime.now(TAIPEI_TZ).date()
-    previous_month = today.month - 1 or 12
-    previous_year = today.year if today.month > 1 else today.year - 1
-    frames = [
-        _twse_monthly_prices(etf_code, today.year, today.month),
-        _twse_monthly_prices(etf_code, previous_year, previous_month),
-    ]
-    frames = [frame for frame in frames if not frame.empty]
-    if not frames:
-        return pd.DataFrame()
-    official = pd.concat(frames)
-    return official[~official.index.duplicated(keep='last')].sort_index()
-
-
-def _merge_official_eod(hist, etf_code):
-    """以證交所收盤價覆蓋最近交易日，並補回 Yahoo 暫時遺漏的日線。"""
-    official = load_twse_recent_eod(etf_code)
-    if official.empty:
-        return hist
-    if hist.empty:
-        return official
-    # combine_first 以呼叫端為主：證交所資料優先，Yahoo 補足較早歷史及其他欄位。
-    return official.combine_first(hist).sort_index()
-
-
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def load_price_data(etf_code, period="2d"):
     """
-    讀取未調整日線收盤價。
-
-    行情看板需要比較「最新交易日收盤」與「前一交易日收盤」，因此以證交所
-    EOD 補齊 Yahoo 暫時缺少的交易日；不再以自動調整後的 Close 或跨日資料計算。
+    嘗試抓取 ETF 歷史股價。
+    1. 若要求 period 為 1d/2d，改用 5d 抓取避免假日/休市造成資料不足，再裁切回最後 2 筆。
+    2. 先嘗試 .TW (上市)，若抓不到或筆數不足，再嘗試 .TWO (上櫃) 作為 fallback。
+    行情資料快取 60 秒，避免看盤畫面長時間沿用舊報價。
     """
     def _try_fetch(suffix, fetch_period):
         try:
             ticker = yf.Ticker(f"{etf_code}{suffix}")
-            hist = ticker.history(
-                period=fetch_period,
-                interval='1d',
-                auto_adjust=False,
-                actions=False,
-                repair=True,
-            )
-            return _normalise_daily_history(hist)
+            # 行情看板必須採用交易所原始價格。還原權息價格適合算長期總報酬，
+            # 但不能當作「最新價」或與前收比較，否則除息／拆分時會顯示錯誤。
+            # 明確以台北日期指定查詢終點（Yahoo 的 end 為不含當日）。
+            # 不能只依賴相對 period，否則部署主機在 UTC 時可能漏掉台灣
+            # 已收盤的最新交易日，導致「最新價／漲跌」拿到前一日資料。
+            taipei_today = datetime.datetime.now(ZoneInfo("Asia/Taipei")).date()
+
+            # 行情大盤只需要最新兩個交易日的日線價格。報價快取 10 分鐘，
+            # 避免開盤時大量分鐘線請求被資料來源限流，進而整張表顯示為 0。
+            if period in ("1d", "2d"):
+                daily = ticker.history(
+                    start=taipei_today - datetime.timedelta(days=10),
+                    end=taipei_today + datetime.timedelta(days=1),
+                    interval="1d", auto_adjust=False, actions=False, timeout=12,
+                ).dropna(subset=['Close'])
+                return daily.tail(2)
+
+            lookback_days = {
+                "5d": 10, "7d": 14, "1mo": 40, "3mo": 100,
+                "6mo": 190, "1y": 380,
+            }.get(fetch_period)
+            if lookback_days:
+                hist = ticker.history(
+                    start=taipei_today - datetime.timedelta(days=lookback_days),
+                    end=taipei_today + datetime.timedelta(days=1),
+                    interval="1d", auto_adjust=False, actions=False, timeout=12,
+                )
+            else:
+                hist = ticker.history(period=fetch_period, auto_adjust=False, actions=False, timeout=12)
+            if hist is not None and not hist.empty and 'Close' in hist.columns:
+                return hist.dropna(subset=['Close'])
+            return pd.DataFrame()
         except Exception:
             return pd.DataFrame()
 
-    # 1mo 是 yfinance 支援的有效區間，能避免 5d 窗口剛好略過前一交易日。
-    fetch_period = '1mo' if period in ('1d', '2d') else period
-    hist = _try_fetch('.TW', fetch_period)
+    fetch_period = "5d" if period in ("1d", "2d") else period
+
+    hist = _try_fetch(".TW", fetch_period)
     if len(hist) < 2:
-        hist_two = _try_fetch('.TWO', fetch_period)
+        hist_two = _try_fetch(".TWO", fetch_period)
         if len(hist_two) > len(hist):
             hist = hist_two
 
-    hist = _merge_official_eod(hist, etf_code)
     if hist.empty:
         return hist
 
-    if period in ('1d', '2d'):
-        return hist.tail(2)
+    if period in ("1d", "2d") and len(hist) > 2:
+        hist = hist.tail(2)
+
     return hist
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def load_price_data_batch(etf_codes, period="2d"):
     """
     平行抓取多檔 ETF 股價，取代逐一序列呼叫。
     回傳 dict：{etf_code: DataFrame}
     """
     results = {}
-    with ThreadPoolExecutor(max_workers=min(10, len(etf_codes) or 1)) as executor:
+    # 避免開盤時大量並行連線觸發資料來源的限流，造成整頁一直等待。
+    with ThreadPoolExecutor(max_workers=min(4, len(etf_codes) or 1)) as executor:
         future_map = {executor.submit(load_price_data, code, period): code for code in etf_codes}
         for future in as_completed(future_map):
             code = future_map[future]
@@ -579,11 +553,7 @@ def build_overview_data(etf_codes):
     for etf in etf_codes:
         hist = hist_map.get(etf, pd.DataFrame())
         etf_display_name = etf_names.get(etf, etf)
-        row = {
-            "代碼": etf, "ETF名稱": etf_display_name,
-            "最新價": 0.0, "漲跌價": 0.0, "漲跌幅": 0.0, "成交量": 0,
-            "資料日期": None,
-        }
+        row = {"代碼": etf, "ETF名稱": etf_display_name, "最新價": 0.0, "漲跌價": 0.0, "漲跌幅": 0.0, "成交量": 0}
 
         if len(hist) >= 2:
             last = hist.iloc[-1]
@@ -595,11 +565,9 @@ def build_overview_data(etf_codes):
             row["漲跌價"] = round(float(change), 2)
             row["漲跌幅"] = round(float(pct), 2)
             row["成交量"] = int(last['Volume']) if 'Volume' in last and pd.notna(last['Volume']) else 0
-            row["資料日期"] = pd.Timestamp(last.name).strftime('%Y-%m-%d')
         elif len(hist) == 1:
             last = hist.iloc[-1]
             row["最新價"] = round(float(last['Close']), 2)
-            row["資料日期"] = pd.Timestamp(last.name).strftime('%Y-%m-%d')
             failed_etfs.append(etf)
         else:
             failed_etfs.append(etf)
@@ -619,7 +587,7 @@ def render_home_page(overview_list):
 
     st.markdown("""
         <div class="custom-notice-box">
-            💡 <strong>使用提示：</strong>點下方每一列右側的 <strong>「查看詳情 →」</strong> 按鈕，即可切換查看該檔 ETF 的「完整成分股明細」與「持股增減異動」。部分股價可能因 yfinance 資料來源處理延遲或異常，導致與即時市價有些微落差，僅供參考，請以證交所或各大券商之實際報價為準。        
+            💡 <strong>使用提示：</strong>點下方每一列右側的 <strong>「查看詳情 →」</strong> 按鈕，即可切換查看該檔 ETF 的「完整成分股明細」與「持股增減異動」。
         </div>
     """, unsafe_allow_html=True)
 
@@ -653,7 +621,7 @@ def render_home_page(overview_list):
         return f"<span class='text-stable'>0.00%</span>"
 
     with lb_up:
-        st.markdown('<div class="alignment-title-large" style="font-size:18px;">🔥 今日強勢 TOP5</div>', unsafe_allow_html=True)
+        st.markdown('<div class="alignment-title-large" style="font-size:18px;">🔥 今日漲幅 TOP5</div>', unsafe_allow_html=True)
         for r in top_up:
             st.markdown(
                 f"<div style='display:flex;justify-content:space-between;padding:4px 8px;'>"
@@ -661,7 +629,7 @@ def render_home_page(overview_list):
                 unsafe_allow_html=True,
             )
     with lb_down:
-        st.markdown('<div class="alignment-title-large" style="font-size:18px;">🧊 今日弱勢 TOP5</div>', unsafe_allow_html=True)
+        st.markdown('<div class="alignment-title-large" style="font-size:18px;">🧊 今日跌幅 TOP5</div>', unsafe_allow_html=True)
         for r in top_down:
             st.markdown(
                 f"<div style='display:flex;justify-content:space-between;padding:4px 8px;'>"
@@ -771,10 +739,13 @@ def render_single_etf():
 
             with st.spinner("正在讀取股價資料..."):
                 hist = load_price_data(selected_etf, period=period_map[selected_period])
+                quote_hist = load_price_data(selected_etf, period="2d")
 
             if not hist.empty:
-                last = hist.iloc[-1]
-                prev = hist.iloc[-2] if len(hist) > 1 else hist.iloc[-1]
+                # 指標卡用分鐘行情＋前收；K 線仍使用使用者選取的日線區間。
+                display_hist = quote_hist if len(quote_hist) >= 2 else hist
+                last = display_hist.iloc[-1]
+                prev = display_hist.iloc[-2] if len(display_hist) > 1 else display_hist.iloc[-1]
                 change = last['Close'] - prev['Close']
                 pct = (change / prev['Close']) * 100 if prev['Close'] not in (0, None) else 0.0
 
@@ -952,17 +923,21 @@ def render_market_analysis():
             hist_map = load_price_data_batch(tuple(etf_list), period=period_map[chart_period])
 
         perf_data = []
-        benchmark_perf = 0.0
+        benchmark_perf = None
         range_start_str = "未知"
         range_end_str = "未知"
         if not df_0050.empty and len(df_0050) >= 2:
             first_b = df_0050['Close'].iloc[0]
             last_b = df_0050['Close'].iloc[-1]
-            benchmark_perf = round(((last_b - first_b) / first_b) * 100, 2) if first_b != 0 else 0.0
+            benchmark_perf = calculate_return(df_0050['Close'])
             range_start_str = df_0050.index[0].strftime('%Y-%m-%d')
             range_end_str = df_0050.index[-1].strftime('%Y-%m-%d')
 
-        perf_data.append({'ETF': "📌 0050 元大台灣50 (大盤)", '績效(%)': benchmark_perf, '類型': '大盤基準'})
+        if benchmark_perf is None:
+            st.warning("0050 基準資料不足，暫時無法進行公平的績效比較。")
+            return
+
+        perf_data.append({'ETF': "📌 0050 元大台灣50 (大盤)", '績效(%)': round(benchmark_perf, 2), '類型': '大盤基準'})
 
         required_min_days = min_days_map[chart_period]
         failed_perf_etfs = []
@@ -970,7 +945,8 @@ def render_market_analysis():
         for etf in etf_list:
             hist = hist_map.get(etf, pd.DataFrame())
 
-            if hist.empty or len(hist) < required_min_days:
+            aligned = align_price_history(df_0050, hist)
+            if len(aligned) < required_min_days:
                 if not hist.empty:
                     failed_perf_etfs.append(etf)
                 continue
@@ -978,9 +954,12 @@ def render_market_analysis():
             etf_display_name = etf_names.get(etf, etf)
             row = {'ETF': etf_display_name, '績效(%)': 0.0, '類型': '主動式 ETF'}
 
-            first_p = hist['Close'].iloc[0]
-            last_p = hist['Close'].iloc[-1]
-            row['績效(%)'] = round(((last_p - first_p) / first_p) * 100, 2) if first_p != 0 else 0.0
+            # 使用與 0050 完全相同的交易日，才可稱為同區間比較。
+            asset_return = calculate_return(aligned['asset'])
+            if asset_return is None:
+                failed_perf_etfs.append(etf)
+                continue
+            row['績效(%)'] = round(asset_return, 2)
             perf_data.append(row)
 
         df_perf = pd.DataFrame(perf_data)
@@ -1003,7 +982,7 @@ def render_market_analysis():
             )
 
             fig_perf.add_hline(
-                y=benchmark_perf,
+                y=round(benchmark_perf, 2),
                 line_dash="dash",
                 line_color="#f59e0b",
                 annotation_text=f" 0050 大盤線 ({benchmark_perf:+.2f}%)",
@@ -1040,10 +1019,13 @@ def render_market_analysis():
                 d_p = pd.read_csv(os.path.join(data_dir, baseline_file), encoding='utf-8-sig')
                 d_n['個股名稱'] = d_n['個股名稱'].astype(str).str.strip()
                 d_p['個股名稱'] = d_p['個股名稱'].astype(str).str.strip()
-                d_n['持有股數'] = pd.to_numeric(d_n['持有股數'], errors='coerce').fillna(0.0)
-                d_p['持有股數'] = pd.to_numeric(d_p['持有股數'], errors='coerce').fillna(0.0)
-                m = pd.merge(d_n, d_p, on='個股名稱', suffixes=('_n', '_p'))
-                m['變動'] = (m['持有股數_n'] - m['持有股數_p']) / 1000
+                d_n['投資比例(%)'] = pd.to_numeric(d_n['投資比例(%)'], errors='coerce').fillna(0.0)
+                d_p['投資比例(%)'] = pd.to_numeric(d_p['投資比例(%)'], errors='coerce').fillna(0.0)
+                # 權重更能反映經理人的調倉；股數會受到基金規模申購／贖回影響。
+                d_n = d_n.groupby('個股名稱', as_index=False)['投資比例(%)'].sum()
+                d_p = d_p.groupby('個股名稱', as_index=False)['投資比例(%)'].sum()
+                m = pd.merge(d_n, d_p, on='個股名稱', how='outer', suffixes=('_n', '_p')).fillna(0.0)
+                m['變動'] = m['投資比例(%)_n'] - m['投資比例(%)_p']
                 m['ETF'] = etf
                 all_changes.append(m[['個股名稱', '變動', 'ETF']])
 
@@ -1056,8 +1038,10 @@ def render_market_analysis():
 
             df_all = pd.concat(all_changes)
             c1, c2 = st.columns(2)
-            buy_raw = df_all[df_all['變動'] > 0]
-            sell_raw = df_all[df_all['變動'] < 0]
+            # 忽略資料四捨五入造成的小數點雜訊（單位：百分點）。
+            change_threshold = 0.05
+            buy_raw = df_all[df_all['變動'] > change_threshold]
+            sell_raw = df_all[df_all['變動'] < -change_threshold]
 
             SYNC_PANEL_HEIGHT = 480
 
@@ -1071,7 +1055,7 @@ def render_market_analysis():
                             stock_name = b_row['個股名稱']
                             with st.expander(f"{stock_name} ({b_row['涉及ETF數量']}家)"):
                                 for _, d_row in buy_raw[buy_raw['個股名稱'] == stock_name].iterrows():
-                                    st.write(f"🔹 {d_row['ETF']} : `+{d_row['變動']:.2f} 張`")
+                                    st.write(f"🔹 {d_row['ETF']} : `+{d_row['變動']:.2f} 個百分點`")
                     else:
                         st.write("目前無符合 2 家以上同步買進的標的。")
 
@@ -1085,7 +1069,7 @@ def render_market_analysis():
                             stock_name = s_row['個股名稱']
                             with st.expander(f"{stock_name} ({s_row['涉及ETF數量']}家)"):
                                 for _, d_row in sell_raw[sell_raw['個股名稱'] == stock_name].iterrows():
-                                    st.write(f"🔸 {d_row['ETF']} : `{d_row['變動']:.2f} 張`")
+                                    st.write(f"🔸 {d_row['ETF']} : `{d_row['變動']:.2f} 個百分點`")
                     else:
                         st.write("目前無符合 2 家以上同步減碼的標的。")
         else:
@@ -1094,7 +1078,6 @@ def render_market_analysis():
     with sub3:
         st.caption(f"📁 資料更新時間：{m_time_global}")
 
-        # ✅ 修正點：以下所有 code 補上縮排，讓它們保持在 with sub3 作用域內
         dfs = []
         for etf in etf_list:
             matching_files = [f for f in files if f.startswith(etf)]
@@ -1103,55 +1086,21 @@ def render_market_analysis():
             f_latest = matching_files[0]
             df = pd.read_csv(os.path.join(data_dir, f_latest), encoding='utf-8-sig')
             df['個股名稱'] = df['個股名稱'].astype(str).str.strip()
-            
-            # 轉為數值（解析失敗者設為 NaN）
-            df['投資比例(%)'] = pd.to_numeric(df['投資比例(%)'], errors='coerce')
-            
-            # 保留有效列，並建立該 ETF 持有標記 (Flag = True)
-            df = df[df['個股名稱'].str.len() > 0][['個股名稱', '投資比例(%)']]
-            df['持有標記'] = True
-            df.columns = ['個股名稱', etf, f"{etf}_flag"]
+            df['投資比例(%)'] = pd.to_numeric(df['投資比例(%)'], errors='coerce').fillna(0)
+            df = df[['個股名稱', '投資比例(%)']].groupby('個股名稱', as_index=False).sum()
+            df.columns = ['個股名稱', etf]
             dfs.append(df)
 
         if dfs:
-            # 合併所有 ETF 資料
-            df_total = reduce(lambda left, right: pd.merge(left, right, on='個股名稱', how='outer'), dfs)
-            
-            etf_cols = [c for c in df_total.columns if c != '個股名稱' and not c.endswith('_flag')]
-            flag_cols = [c for c in df_total.columns if c.endswith('_flag')]
+            df_total = reduce(lambda left, right: pd.merge(left, right, on='個股名稱', how='outer'), dfs).fillna(0)
+            etf_cols = [c for c in df_total.columns if c != '個股名稱']
 
-            # 1. 填補 Flag 欄位：有在清單內為 True，否則為 False
-            df_total[flag_cols] = df_total[flag_cols].fillna(False)
+            df_total['持有投信數'] = (df_total[etf_cols] > 0).sum(axis=1)
+            df_total['核心標記'] = df_total.apply(lambda r: "★" if all(r[col] > 1.0 for col in etf_cols if r[col] > 0) else "", axis=1)
 
-            # 2. 計算真正的「持有投信數」
-            df_total['持有投信數'] = df_total[flag_cols].sum(axis=1)
-
-            # 核心過濾：只保留被 2 家（含）以上投信共同持有的股票
-            df_total = df_total[df_total['持有投信數'] >= 2].copy()
-
-            # 3. 填補未持有的比例為 0，方便數值計算
-            df_total[etf_cols] = df_total[etf_cols].fillna(0)
-
-            # 4. 計算核心標記 (★)：有買進該股票的 ETF 中，投資比例是否「全都 > 1.00%」
-            def check_core(row):
-                # 取出該股票被哪些 ETF 真正持有
-                held_etfs = [col for col in etf_cols if row[f"{col}_flag"]]
-                # 檢查有持有的 ETF 比例是否皆 > 1.00%
-                if held_etfs and all(row[col] > 1.0 for col in held_etfs):
-                    return "★"
-                return ""
-
-            df_total['核心標記'] = df_total.apply(check_core, axis=1)
-
-            # 5. 格式化顯示：有持有的顯示 % 數，未持有的顯示 "-"
             for col in etf_cols:
-                flag_col = f"{col}_flag"
-                df_total[col] = df_total.apply(
-                    lambda r: f"{r[col]:.2f}%" if r[flag_col] else "-", 
-                    axis=1
-                )
+                df_total[col] = df_total[col].apply(lambda x: f"{x:.2f}%" if x > 0 else "-")
 
-            # 整理最終顯示欄位
             view_cols = ['核心標記', '持有投信數', '個股名稱'] + etf_cols
             df_disp = df_total[view_cols].sort_values('持有投信數', ascending=False)
 
@@ -1159,7 +1108,7 @@ def render_market_analysis():
 
             st.markdown("""
                 <div class="custom-notice-box">
-                    📝 <strong>【標記說明】</strong> ★ 核心標記：代表該股票在所有買進它的主動式 ETF 中持股皆大於 1.00% ｜ 持有投信數：代表該股票被多少家主動式 ETF 納入成分股（僅列出被 2 家以上共同持有的標的）
+                    📝 <strong>【標記說明】</strong> ★ 核心標記：代表該股票在所有買進它的主動式 ETF 中持股皆大於 1.00% ｜ 持有投信數：代表該股票被多少家主動式 ETF 納入成分股
                 </div>
             """, unsafe_allow_html=True)
 
