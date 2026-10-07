@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import os
+import requests
 import plotly.graph_objects as go
 import plotly.express as px
 import yfinance as yf
@@ -458,6 +459,66 @@ st.sidebar.caption(f"📁 持股資料日期：{m_time_global}")
 
 
 # ==========================================
+# 模組化功能 0: 證交所 / 櫃買 MIS 即時報價（漲跌價、漲跌幅以此為準）
+# ==========================================
+@st.cache_data(ttl=600, show_spinner=False)
+def load_exchange_quotes(etf_codes_tuple):
+    """讀取證交所/櫃買 MIS 報價:最新成交價(z)與昨收(y)。
+    全部失敗時丟出 RuntimeError(例外不會被 st.cache_data 快取)。
+    Yahoo 僅保留給歷史 K 線與備援;首頁漲跌不用它的日線推算。
+    """
+    base_url = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
+    session = requests.Session()
+    session.headers.update({"User-Agent": "Mozilla/5.0"})
+    try:
+        session.get("https://mis.twse.com.tw/stock/index.jsp", timeout=12)  # 先取得 session cookie
+    except requests.RequestException:
+        pass
+
+    def _to_float(text):
+        text = str(text).strip()
+        if text in ("", "-", "null"):
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+
+    result = {}
+    for market in ("tse", "otc"):
+        channels = "|".join(f"{market}_{code}.tw" for code in etf_codes_tuple)
+        try:
+            response = session.get(
+                base_url,
+                params={"ex_ch": channels, "json": "1", "delay": "0"},
+                timeout=12,
+            )
+            response.raise_for_status()
+            rows = response.json().get("msgArray", [])
+        except (requests.RequestException, ValueError):
+            continue
+        for quote in rows:
+            code = str(quote.get("c", "")).strip()
+            prev_close = _to_float(quote.get("y"))
+            if code not in etf_codes_tuple or prev_close is None or prev_close <= 0:
+                continue
+            last_price = _to_float(quote.get("z"))
+            if last_price is None:          # 尚未成交(如開盤前):以昨收顯示為平盤
+                last_price = prev_close
+            volume_lots = _to_float(quote.get("v")) or 0
+            result[code] = {
+                "最新價": last_price,
+                "漲跌價": last_price - prev_close,
+                "漲跌幅": (last_price / prev_close - 1) * 100,
+                "成交量": int(volume_lots * 1000),   # v 單位是「張」,換成「股」與原表一致
+            }
+
+    if not result:
+        raise RuntimeError("交易所報價取得失敗")
+    return result
+
+
+# ==========================================
 # 模組化功能 1: 原始 Yahoo Finance 歷史行情加載 (含 .TWO fallback 與防呆)
 # ==========================================
 @st.cache_data(ttl=600, show_spinner=False)
@@ -546,15 +607,31 @@ def load_price_data_batch(etf_codes, period="2d"):
 # 模組化功能 2: 行情基本資料集建構
 # ==========================================
 def build_overview_data(etf_codes):
-    hist_map = load_price_data_batch(tuple(etf_codes), period="2d")
+    try:
+        exchange_quotes = load_exchange_quotes(tuple(etf_codes))
+    except RuntimeError:
+        exchange_quotes = {}
+
+    # 只有交易所沒回傳的代碼,才改用 Yahoo 備援
+    missing = [e for e in etf_codes if e not in exchange_quotes]
+    hist_map = load_price_data_batch(tuple(missing), period="2d") if missing else {}
 
     overview_data = []
     failed_etfs = []
     for etf in etf_codes:
-        hist = hist_map.get(etf, pd.DataFrame())
         etf_display_name = etf_names.get(etf, etf)
         row = {"代碼": etf, "ETF名稱": etf_display_name, "最新價": 0.0, "漲跌價": 0.0, "漲跌幅": 0.0, "成交量": 0}
 
+        quote = exchange_quotes.get(etf)
+        if quote:
+            row["最新價"] = round(quote["最新價"], 2)
+            row["漲跌價"] = round(quote["漲跌價"], 2)
+            row["漲跌幅"] = round(quote["漲跌幅"], 2)
+            row["成交量"] = quote["成交量"]
+            overview_data.append(row)
+            continue
+
+        hist = hist_map.get(etf, pd.DataFrame())
         if len(hist) >= 2:
             last = hist.iloc[-1]
             prev = hist.iloc[-2]
@@ -592,7 +669,7 @@ def render_home_page(overview_list):
     """, unsafe_allow_html=True)
 
     if st.session_state.get('_failed_etfs'):
-        st.caption(f"⚠️ 以下代碼目前無法從 yfinance 取得足夠的近2日股價資料（可能尚未開盤或資料延遲）：{', '.join(st.session_state['_failed_etfs'])}")
+        st.caption(f"⚠️ 以下代碼目前無法取得足夠的近2日股價資料（可能尚未開盤或資料延遲）：{', '.join(st.session_state['_failed_etfs'])}")
 
     total_etfs = len(overview_list)
     up_count = sum(1 for x in overview_list if x["漲跌價"] > 0)
@@ -742,18 +819,29 @@ def render_single_etf():
                 quote_hist = load_price_data(selected_etf, period="2d")
 
             if not hist.empty:
-                # 指標卡用分鐘行情＋前收；K 線仍使用使用者選取的日線區間。
+                # 指標卡預設用日線兩日資料；交易所有報價時一律以交易所為準。K 線仍使用使用者選取的日線區間。
                 display_hist = quote_hist if len(quote_hist) >= 2 else hist
                 last = display_hist.iloc[-1]
                 prev = display_hist.iloc[-2] if len(display_hist) > 1 else display_hist.iloc[-1]
+                last_close = last['Close']
                 change = last['Close'] - prev['Close']
                 pct = (change / prev['Close']) * 100 if prev['Close'] not in (0, None) else 0.0
+                volume = int(last['Volume']) if 'Volume' in last and pd.notna(last['Volume']) else 0
+
+                try:
+                    ex_quote = load_exchange_quotes(tuple(etf_list)).get(selected_etf)
+                except RuntimeError:
+                    ex_quote = None
+                if ex_quote:
+                    last_close, change, pct, volume = (
+                        ex_quote["最新價"], ex_quote["漲跌價"], ex_quote["漲跌幅"], ex_quote["成交量"]
+                    )
 
                 c1, c2, c3, c4 = st.columns(4)
-                c1.metric("目前股價", f"{last['Close']:.2f}")
+                c1.metric("目前股價", f"{last_close:.2f}")
                 c2.metric("漲跌價", f"{'+' if change > 0 else ''}{change:.2f}")
                 c3.metric("漲跌幅", f"{'+' if pct > 0 else ''}{pct:.2f}%")
-                c4.metric("成交量(股)", f"{int(last['Volume']) if 'Volume' in last and pd.notna(last['Volume']) else 0:,}")
+                c4.metric("成交量(股)", f"{volume:,}")
 
                 from plotly.subplots import make_subplots
 
