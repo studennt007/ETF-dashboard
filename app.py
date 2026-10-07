@@ -1163,6 +1163,7 @@ def render_market_analysis():
             etf_cols = [c for c in df_total.columns if c != '個股名稱']
 
             df_total['持有投信數'] = (df_total[etf_cols] > 0).sum(axis=1)
+            df_total = df_total[df_total['持有投信數'] >= 2]
             df_total['核心標記'] = df_total.apply(lambda r: "★" if all(r[col] > 1.0 for col in etf_cols if r[col] > 0) else "", axis=1)
 
             for col in etf_cols:
