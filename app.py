@@ -176,16 +176,12 @@ def get_file_date_str(filename):
         return "00000000"
 
 
-def pick_baseline_file(etf_files_sorted_desc, period_days=None, custom_date_str=None):
+def pick_baseline_file(etf_files_sorted_desc, period_days=None):
     """
     etf_files_sorted_desc: 該 ETF 由新到舊排序的檔名 list (index 0 為最新)
     period_days: 1/5/10/20，表示往回數第幾份資料(交易日)
-    custom_date_str: 'YYYYMMDD'，表示找『小於等於此日期』中最新的一份資料
     回傳挑選到的基準檔名字串，找不到則回傳 None
     """
-    if custom_date_str:
-        candidates = [f for f in etf_files_sorted_desc if get_file_date_str(f) <= custom_date_str]
-        return candidates[0] if candidates else None
     if period_days is not None and period_days < len(etf_files_sorted_desc):
         return etf_files_sorted_desc[period_days]
     return None
@@ -199,6 +195,9 @@ def pill_selector(label, options, key, horizontal=True):
     """
     state_key = f"{key}_pill_value"
     if state_key not in st.session_state:
+        st.session_state[state_key] = options[0]
+    # 若 session 內殘留的選項已不在目前選項中（例如舊版的「自訂日期」），重設為預設值
+    if st.session_state[state_key] not in options:
         st.session_state[state_key] = options[0]
 
     if hasattr(st, "segmented_control"):
@@ -224,29 +223,12 @@ def pill_selector(label, options, key, horizontal=True):
     return st.session_state[state_key]
 
 
-def render_period_selector(key_prefix, available_date_strs):
-    """畫出『1天/5天/10天/20天/自訂日期』選擇器，回傳 (period_days, custom_date_str)"""
-    options = ["1天", "5天", "10天", "20天", "自訂日期"]
+def render_period_selector(key_prefix):
+    """畫出『1天/5天/10天/20天』選擇器，回傳 period_days"""
+    options = ["1天", "5天", "10天", "20天"]
     choice = pill_selector("比較基準區間", options, key_prefix)
     period_map = {"1天": 1, "5天": 5, "10天": 10, "20天": 20}
-
-    if choice == "自訂日期":
-        sorted_dates = sorted(available_date_strs)
-        if not sorted_dates:
-            st.warning("目前沒有可用的歷史資料日期。")
-            return 1, None
-        min_d = datetime.datetime.strptime(sorted_dates[0], '%Y%m%d').date()
-        max_d = datetime.datetime.strptime(sorted_dates[-1], '%Y%m%d').date()
-        picked = st.date_input(
-            "選擇比較基準日期",
-            value=min_d,
-            min_value=min_d,
-            max_value=max_d,
-            key=f"{key_prefix}_date_input"
-        )
-        return None, picked.strftime('%Y%m%d')
-    else:
-        return period_map[choice], None
+    return period_map.get(choice, 1)
 
 
 def render_risk_metrics_explainer():
@@ -908,12 +890,11 @@ def render_single_etf():
         with tab3:
             st.caption(f"📁 資料更新時間：{m_time}")
             if len(etf_files) >= 2:
-                all_date_strs = [get_file_date_str(f) for f in etf_files]
-                period_days, custom_date_str = render_period_selector(f"holding_{selected_etf}", all_date_strs)
-                baseline_file = pick_baseline_file(etf_files, period_days, custom_date_str)
+                period_days = render_period_selector(f"holding_{selected_etf}")
+                baseline_file = pick_baseline_file(etf_files, period_days)
 
                 if baseline_file is None:
-                    st.warning("⚠️ 找不到符合條件的比較基準資料，目前歷史資料筆數不足，請改選較近的區間或日期。")
+                    st.warning("⚠️ 找不到符合條件的比較基準資料，目前歷史資料筆數不足，請改選較近的區間。")
                 else:
                     baseline_date_display = get_date_from_filename(baseline_file)
                     baseline_idx = etf_files.index(baseline_file)
@@ -997,8 +978,7 @@ def render_market_analysis():
         st.markdown("""
             <div class="custom-notice-box">
                 💡 <strong>嚴格區間對比提示：</strong> 系統已自動加入 <strong>0050 元大台灣50</strong> 作為市場基準線（Benchmark）。<br>
-                ⚠️ <strong>存活過濾機制：</strong>為確保對比公平性，<strong>若 ETF 上市時間未滿所選區間，將自動隱藏不予評比</strong>，避免剛上市新股造成數據失真。<br>
-                📅 <strong>區間說明：</strong>「1週/1個月/3個月/6個月」是以「今天」為終點，往回算日曆天數（例如1週=往回7個日曆天），實際對應的交易日會在下方顯示。
+                ⚠️ <strong>存活過濾機制：</strong>為確保對比公平性，<strong>若 ETF 上市時間未滿所選區間，將自動隱藏不予評比</strong>，避免剛上市新股造成數據失真。<br>s
             </div>
         """, unsafe_allow_html=True)
 
@@ -1094,42 +1074,39 @@ def render_market_analysis():
     with sub2:
         st.caption(f"📁 資料更新時間：{m_time_global}")
 
-        all_dates_global = sorted(set(get_file_date_str(f) for f in files))
-        period_days, custom_date_str = render_period_selector("sync_rebalance", all_dates_global)
+        period_days = render_period_selector("sync_rebalance")
 
         all_changes = []
         for etf in etf_list:
             f_list = sorted([f for f in files if f.startswith(etf)], reverse=True)
-            baseline_file = pick_baseline_file(f_list, period_days, custom_date_str)
+            baseline_file = pick_baseline_file(f_list, period_days)
 
             if baseline_file is not None and len(f_list) >= 1 and baseline_file != f_list[0]:
                 d_n = pd.read_csv(os.path.join(data_dir, f_list[0]), encoding='utf-8-sig')
                 d_p = pd.read_csv(os.path.join(data_dir, baseline_file), encoding='utf-8-sig')
-                d_n['個股名稱'] = d_n['個股名稱'].astype(str).str.strip()
-                d_p['個股名稱'] = d_p['個股名稱'].astype(str).str.strip()
-                d_n['投資比例(%)'] = pd.to_numeric(d_n['投資比例(%)'], errors='coerce').fillna(0.0)
-                d_p['投資比例(%)'] = pd.to_numeric(d_p['投資比例(%)'], errors='coerce').fillna(0.0)
-                # 權重更能反映經理人的調倉；股數會受到基金規模申購／贖回影響。
-                d_n = d_n.groupby('個股名稱', as_index=False)['投資比例(%)'].sum()
-                d_p = d_p.groupby('個股名稱', as_index=False)['投資比例(%)'].sum()
+                for d in (d_n, d_p):
+                    d['個股名稱'] = d['個股名稱'].astype(str).str.strip()
+                    d['持有股數'] = pd.to_numeric(d['持有股數'], errors='coerce').fillna(0.0)
+                    d['投資比例(%)'] = pd.to_numeric(d['投資比例(%)'], errors='coerce').fillna(0.0)
+                # 同名項目若被拆成多列，先加總，避免重複計算或遺漏。
+                d_n = d_n.groupby('個股名稱', as_index=False)[['持有股數', '投資比例(%)']].sum()
+                d_p = d_p.groupby('個股名稱', as_index=False)[['持有股數', '投資比例(%)']].sum()
                 m = pd.merge(d_n, d_p, on='個股名稱', how='outer', suffixes=('_n', '_p')).fillna(0.0)
-                m['變動'] = m['投資比例(%)_n'] - m['投資比例(%)_p']
+                # 加碼／減碼完全以張數（1 張 = 1000 股）變動判斷；比例變動僅作為顯示參考。
+                m['張數變動'] = (m['持有股數_n'] - m['持有股數_p']) / 1000.0
+                m['權重變動'] = m['投資比例(%)_n'] - m['投資比例(%)_p']
                 m['ETF'] = etf
-                all_changes.append(m[['個股名稱', '變動', 'ETF']])
+                all_changes.append(m[['個股名稱', '張數變動', '權重變動', 'ETF']])
 
         if all_changes:
-            if custom_date_str:
-                baseline_label = f"{custom_date_str[:4]}-{custom_date_str[4:6]}-{custom_date_str[6:8]}"
-            else:
-                baseline_label = f"{period_days} 個交易日前"
+            baseline_label = f"{period_days} 個交易日前"
             st.caption(f"📅 本次比較區間：{baseline_label} → {m_time_global}（僅納入有足夠歷史資料的 ETF）")
 
             df_all = pd.concat(all_changes)
             c1, c2 = st.columns(2)
-            # 忽略資料四捨五入造成的小數點雜訊（單位：百分點）。
-            change_threshold = 0.05
-            buy_raw = df_all[df_all['變動'] > change_threshold]
-            sell_raw = df_all[df_all['變動'] < -change_threshold]
+            # 張數變多 = 加碼；張數變少 = 減碼（不論比例變化）。
+            buy_raw = df_all[df_all['張數變動'] > 0]
+            sell_raw = df_all[df_all['張數變動'] < 0]
 
             SYNC_PANEL_HEIGHT = 480
 
@@ -1142,8 +1119,9 @@ def render_market_analysis():
                         for _, b_row in buy_grouped.iterrows():
                             stock_name = b_row['個股名稱']
                             with st.expander(f"{stock_name} ({b_row['涉及ETF數量']}家)"):
-                                for _, d_row in buy_raw[buy_raw['個股名稱'] == stock_name].iterrows():
-                                    st.write(f"🔹 {d_row['ETF']} : `+{d_row['變動']:.2f} 個百分點`")
+                                detail = buy_raw[buy_raw['個股名稱'] == stock_name].sort_values('張數變動', ascending=False)
+                                for _, d_row in detail.iterrows():
+                                    st.write(f"🔹 {d_row['ETF']} : `{d_row['張數變動']:+,.2f} 張 ({d_row['權重變動']:+.2f}%)`")
                     else:
                         st.write("目前無符合 2 家以上同步買進的標的。")
 
@@ -1156,12 +1134,13 @@ def render_market_analysis():
                         for _, s_row in sell_grouped.iterrows():
                             stock_name = s_row['個股名稱']
                             with st.expander(f"{stock_name} ({s_row['涉及ETF數量']}家)"):
-                                for _, d_row in sell_raw[sell_raw['個股名稱'] == stock_name].iterrows():
-                                    st.write(f"🔸 {d_row['ETF']} : `{d_row['變動']:.2f} 個百分點`")
+                                detail = sell_raw[sell_raw['個股名稱'] == stock_name].sort_values('張數變動', ascending=True)
+                                for _, d_row in detail.iterrows():
+                                    st.write(f"🔸 {d_row['ETF']} : `{d_row['張數變動']:+,.2f} 張 ({d_row['權重變動']:+.2f}%)`")
                     else:
                         st.write("目前無符合 2 家以上同步減碼的標的。")
         else:
-            st.warning("⚠️ 目前沒有任何 ETF 的歷史資料滿足所選區間，請改選較近的天數或日期。")
+            st.warning("⚠️ 目前沒有任何 ETF 的歷史資料滿足所選區間，請改選較近的天數。")
 
     with sub3:
         st.caption(f"📁 資料更新時間：{m_time_global}")
